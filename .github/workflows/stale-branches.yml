@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -39,11 +39,22 @@ jobs:
           # Branches that head an OPEN pr are in flight by definition.
           gh pr list --state open --json headRefName --jq '.[].headRefName' > /tmp/open_heads.txt || : > /tmp/open_heads.txt
 
+          # Protected branches are permanent BY POLICY, not by activity: the
+          # trunks, and standing branches like prerun/rosbag-onboard which is
+          # deliberately never merged and never deleted. By age alone prerun
+          # looks maximally stale, so this report used to list it as
+          # "N unmerged commit(s) - review" directly above a copy-paste
+          # `git push origin --delete` - which is how it was lost once already.
+          # Never surface a branch the repo has explicitly marked permanent.
+          gh api "repos/${GITHUB_REPOSITORY}/branches?protected=true&per_page=100" \
+            --jq '.[].name' > /tmp/protected.txt || : > /tmp/protected.txt
+
           NOW=$(date +%s)
           {
             echo "### Stale branch report"
             echo
             echo "Branches with no open PR and no commit in the last ${STALE_DAYS} days."
+            echo "Protected branches (trunks, and standing branches such as \`prerun/*\`) are excluded."
             echo "\`merged\` means fully contained in \`${DEFAULT}\`; anything else needs a human"
             echo "to check whether its content landed some other way before deleting."
             echo
@@ -56,6 +67,7 @@ jobs:
                         | grep -vE "^origin/(HEAD|${DEFAULT}|main)$"); do
             b=${ref#origin/}
             grep -qx "$b" /tmp/open_heads.txt && continue
+            grep -qx "$b" /tmp/protected.txt && continue
 
             ts=$(git log -1 --format=%ct "$ref" 2>/dev/null || echo "$NOW")
             age=$(( (NOW - ts) / 86400 ))

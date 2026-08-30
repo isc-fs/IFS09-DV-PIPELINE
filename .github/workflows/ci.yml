@@ -23,9 +23,27 @@ jobs:
     # the tests import (geometry_msgs, nav_msgs, ...) are already present.
     container: ros:humble-ros-base
     timeout-minutes: 20
+    env:
+      # Pin pip's cache to a fixed path so actions/cache can address it. The
+      # job runs in a container, so the default ~/.cache/pip is a container
+      # path that varies with the image's HOME; a literal path is stable.
+      PIP_CACHE_DIR: /tmp/pip-cache
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+
+      - name: Cache pip downloads
+        # The dependency set is declared inline in this file (there is no
+        # requirements.txt), so the workflow's own hash is the cache key. Any
+        # edit here busts it; restore-keys then falls back to the newest
+        # previous cache and pip only fetches what actually changed.
+        # A miss is not a failure - it just reinstalls, as before.
+        uses: actions/cache@v6
+        with:
+          path: /tmp/pip-cache
+          key: pip-humble-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            pip-humble-
 
       - name: Install apt deps
         # ros:humble-ros-base ships without pip or colcon; the runtime image
@@ -48,13 +66,13 @@ jobs:
         # numpy is pinned <2 there because cv_bridge in ros:humble is ABI
         # locked to 1.x; keep the pin so CI matches runtime.
         run: |
-          python3 -m pip install --no-cache-dir "numpy==1.24.*"
-          python3 -m pip install --no-cache-dir \
+          python3 -m pip install "numpy==1.24.*"
+          python3 -m pip install \
             "numba>=0.59" scipy scikit-learn transforms3d \
             typing_extensions icecream
           # cone_slam imports gtsam at module scope, so the SLAM tests cannot
           # even be collected without it. Pin matches the runtime image.
-          python3 -m pip install --no-cache-dir "gtsam==4.3a0"
+          python3 -m pip install "gtsam==4.3a0"
 
       - name: Install the FaSTTUBe planner
         # path_planning's tests importorskip('fsd_path_planning'). Under the
@@ -127,7 +145,7 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-results
           path: pytest-results.xml
