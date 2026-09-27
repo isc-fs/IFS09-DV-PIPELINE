@@ -527,6 +527,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._finished_pub = None
         self._final_lap_pub = None
         self._stop_request_pub = None
+        self._pub_hz = None
+        self._pub_latency_ms = None
+        self._pub_age_ms = None
+        self._pub_commit_ms = None
+        self._pub_map_size = None
+        self._pub_n_obs = None
 
     # ------------------------------------------------------------------
     # Run-memory reset
@@ -731,6 +737,24 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._stop_request_pub = self.create_lifecycle_publisher(
             Bool, "/slam/stop_request", finished_qos
         )
+        self._pub_hz = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/hz", 10
+        )
+        self._pub_latency_ms = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/latency_ms", 10
+        )
+        self._pub_age_ms = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/age_ms", 10
+        )
+        self._pub_commit_ms = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/commit_ms", 10
+        )
+        self._pub_map_size = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/map_size", 10
+        )
+        self._pub_n_obs = self.create_lifecycle_publisher(
+            Float32, "/cone_slam/n_obs", 10
+        )
 
         # TF broadcaster — non-lifecycle (tf2 doesn't ship lifecycle
         # variants). Used to publish the dynamic `map → odom` drift
@@ -933,6 +957,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             self._gt_aligned_pub,
             self._gt_error_pub,
             self._finished_pub,
+            self._pub_hz,
+            self._pub_latency_ms,
+            self._pub_age_ms,
+            self._pub_commit_ms,
+            self._pub_map_size,
+            self._pub_n_obs,
         ):
             if pub is not None:
                 self.destroy_publisher(pub)
@@ -945,6 +975,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._finished_pub = None
         self._final_lap_pub = None
         self._stop_request_pub = None
+        self._pub_hz = None
+        self._pub_latency_ms = None
+        self._pub_age_ms = None
+        self._pub_commit_ms = None
+        self._pub_map_size = None
+        self._pub_n_obs = None
 
         # tf2 broadcasters are not lifecycle-aware; drop the ref.
         # The static map→odom broadcaster was retired in #382 (map→odom
@@ -1101,9 +1137,19 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             self._latest_rpm is not None
             and abs(self._latest_rpm) <= STATIONARY_SPEED_MS
         )
-        self._preint.push_sample(
-            ImuSample(t=t, accel=accel, gyro=gyro, stationary=stationary)
-        )
+        # Buffer raw samples only while someone will consume them: the
+        # INIT bias calibration (both motion models) and the legacy IMU
+        # preintegration factor (motion_model=imu). In the default
+        # motion_model=odom the EKF's /odom delta is the motion source and
+        # integrate_to() is never called, so an unconditional push would
+        # grow the preintegrator buffer without bound for the whole run
+        # (~400 samples/s → ~100 MB over a 10 min session).
+        if self._preint is not None and (
+            self._state != State.SLAM_RUNNING or self._motion_model == "imu"
+        ):
+            self._preint.push_sample(
+                ImuSample(t=t, accel=accel, gyro=gyro, stationary=stationary)
+            )
 
         if self._state == State.INIT_WAITING_IMU:
             self._calib_started_t = t
@@ -1238,7 +1284,17 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 self._publish_cone_map(stamp)
                 return
             between_pose = self._prev_scan_odom_pose.inverse().compose(cur_odom_pose)
-            v_world = self._odom_world_velocity(self._latest_supervisor_odom)
+            # Motion prediction at X(k): prev SLAM pose ∘ EKF delta. This is
+            # the same value stage_odom_motion_step seeds X(k) with; computed
+            # here too because the velocity below must be expressed in the
+            # SLAM (map) frame — i.e. rotated through the *predicted map yaw*,
+            # not the /odom-frame yaw. The two frames differ by the map→odom
+            # drift correction, so rotating with the odom yaw would put V(k)
+            # (and the /slam/pose twist derived from it) off by that dyaw.
+            predicted_pose = self._latest_result.pose.compose(between_pose)
+            v_world = self._odom_world_velocity(
+                self._latest_supervisor_odom, predicted_pose.rotation().yaw()
+            )
             # Localization-only fork: once the lap is closed and mapping is
             # frozen, stop growing the smoothed graph. Solve a fixed-size
             # pose-only problem against the frozen map instead — no iSAM2
@@ -1248,7 +1304,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             if self._mapping_frozen and bool(self.get_parameter(
                     "localization_only_after_loop_close").value):
                 self._prev_scan_odom_pose = cur_odom_pose
-                predicted_pose = self._latest_result.pose.compose(between_pose)
+                # predicted_pose already computed above from the EKF delta.
                 # Mission-completion (#384): keep counting laps after the
                 # mapping-freeze switched us to the localization-only path.
                 if self._lap_counter.update(
@@ -1807,18 +1863,20 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         )
 
     @staticmethod
-    def _odom_world_velocity(msg: Odometry) -> np.ndarray:
-        """World-frame (nav-frame) velocity from a nav_msgs/Odometry.
+    def _odom_world_velocity(msg: Odometry, map_yaw: float) -> np.ndarray:
+        """SLAM-frame (map / nav-frame) velocity from a nav_msgs/Odometry.
 
         GTSAM's V(k) lives in the navigation frame, but nav_msgs/Odometry
         twist is expressed in child_frame_id (base_link / body). Rotate
-        the planar body velocity through the pose yaw; z is taken as-is
-        (flat track). Used to seed and softly anchor V(k) in
-        ``motion_model='odom'`` so the velocity node stays determined
-        without an IMU factor.
+        the planar body velocity through ``map_yaw`` — the car's yaw in
+        the SLAM map frame (the motion-predicted yaw at X(k)) — NOT the
+        yaw carried in ``msg.pose`` (that one is in the ``odom`` frame,
+        which differs from ``map`` by the map→odom drift correction).
+        z is taken as-is (flat track). Used to seed and softly anchor
+        V(k) in ``motion_model='odom'`` so the velocity node stays
+        determined without an IMU factor.
         """
-        pose = _odom_to_pose3(msg)
-        yaw = pose.rotation().yaw()
+        yaw = float(map_yaw)
         vb = msg.twist.twist.linear
         c, s = np.cos(yaw), np.sin(yaw)
         return np.array(
@@ -1975,6 +2033,11 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             f"corr=({dx:+.2f},{dy:+.2f}|{corr_mag:.2f}m,"
             f"{np.degrees(dyaw):+.1f}deg)"
         )
+        hz = 1000.0 / dt_pub_ms if dt_pub_ms > 1e-3 else 0.0
+        self._publish_f32(self._pub_hz, hz)
+        self._publish_f32(self._pub_latency_ms, proc_ms)
+        self._publish_f32(self._pub_age_ms, age_ms)
+        self._publish_f32(self._pub_map_size, float(len(self._db)))
 
     def _emit_slam_prof(self, tag: str, n_obs: int) -> None:
         """Emit the per-scan latency breakdown (SLAM_PROF) so we can see
@@ -2049,6 +2112,23 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             f"db={db:5.1f} pub={pub:5.1f} "
             f"obs={n_obs} map={len(self._db)}"
         )
+        if commit == commit:  # skip NaN (cascade-skip path has no commit)
+            self._publish_f32(self._pub_commit_ms, commit)
+        self._publish_f32(self._pub_n_obs, float(n_obs))
+
+    def _publish_f32(self, pub, value: float) -> None:
+        if pub is None:
+            return
+        getter = getattr(pub, "get_subscription_count", None)
+        if getter is not None:
+            try:
+                if int(getter()) <= 0:
+                    return
+            except Exception:
+                pass
+        msg = Float32()
+        msg.data = float(value)
+        pub.publish(msg)
 
     def _publish_state(self, stamp, result: ScanResult) -> None:
         msg = Odometry()
@@ -2440,7 +2520,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         keyframe_every = int(
             self.get_parameter("cone_map_full_publish_every_n_scans").value
         )
-        keyframe = keyframe_every > 0 and (self._graph.step % keyframe_every == 0)
+        # Use the monotonic scan counter, not the bare graph step: once
+        # mapping is frozen and we're in localization-only mode the iSAM2
+        # step stops advancing, so `step % N` would either never fire again
+        # or fire on every scan for the rest of the run.
+        scan_idx = self._graph.step + self._loc_scan
+        keyframe = keyframe_every > 0 and (scan_idx % keyframe_every == 0)
         self._publish_full_cone_map(stamp, min_obs, keyframe=keyframe)
 
         # Periodic diagnostic — every ~5 s of /Conos publishes,

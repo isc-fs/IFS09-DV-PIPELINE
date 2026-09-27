@@ -27,6 +27,7 @@ the longitudinal controller guarantees only one of them is non-zero.
 """
 from __future__ import annotations
 import math
+import time
 from typing import Optional
 
 import rclpy
@@ -37,7 +38,7 @@ from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from fs_msgs.msg import ControlCommand
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, Float32
-from visualization_msgs.msg import MarkerArray
+from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from transforms3d.euler import quat2euler
@@ -132,6 +133,7 @@ class ControlNode(BaseLifecycleNode):
         self._emergency_pub = None
         self._v_set_pub = None
         self._kappa_max_pub = None
+        self._latency_pub = None
         self._sub_path = None
         self._sub_pose = None
         self._sub_odom = None
@@ -183,6 +185,8 @@ class ControlNode(BaseLifecycleNode):
             Float32, "/control/v_set_mps", 10)
         self._kappa_max_pub = self.create_lifecycle_publisher(
             Float32, "/control/kappa_max_per_m", 10)
+        self._latency_pub = self.create_lifecycle_publisher(
+            Float32, "/control/latency_ms", 10)
 
         # TF listener — post-#382 sim_supervisor publishes
         # odom→base_link (100 Hz dead-reckoning) and slam_node
@@ -190,7 +194,12 @@ class ControlNode(BaseLifecycleNode):
         # map→odom→base_link gives the leaf-pose used for waypoint
         # projection.
         self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
+        # spin_thread=False: this process already rclpy.spin()s the node.
+        # Humble's TransformListener default (True) adds the same node to a
+        # second executor, so every /tf sample is inserted twice and the
+        # second hit logs TF_OLD_DATA (equal timestamps are "from the past").
+        self._tf_listener = TransformListener(
+            self._tf_buffer, self, spin_thread=False)
 
         return TransitionCallbackReturn.SUCCESS
 
@@ -217,6 +226,14 @@ class ControlNode(BaseLifecycleNode):
         self._last_steering = 0.0
         self._tick_count = 0
 
+        # Controller-internal state (PI integrator, Stanley steer-rate
+        # warm start) lives in the strategy objects, which are built in
+        # on_configure and survive deactivate→activate. Clear them too,
+        # or a wound-up integral from the previous run produces a
+        # throttle/regen transient on the next start.
+        if self._drive is not None:
+            self._drive.reset()
+
         # Post-#384: the bridge's EBS gate is owned by the supervisor;
         # the supervisor publishes /signal/ebs_reset itself on
         # Phase 1 ready (mirrors what the uDV firmware does on the
@@ -224,7 +241,9 @@ class ControlNode(BaseLifecycleNode):
         # /ctrl/emergency now — publish the initial default-false
         # latched value so a late-joining mission_control sees a
         # defined state immediately.
-        self._emergency_pub.publish(Bool(data=False))
+        # LifecyclePublisher.publish() is a silent no-op until the base
+        # class on_activate() enables the managed publishers, so this
+        # one-shot publish happens after super() below.
 
         # Subscriptions
         self._sub_path = self.create_subscription(
@@ -257,7 +276,11 @@ class ControlNode(BaseLifecycleNode):
         self._tick_timer = self.create_timer(
             1.0 / self.PUBLISH_RATE_HZ, self._tick)
 
-        return super().on_activate(state)
+        ret = super().on_activate(state)
+        if ret != TransitionCallbackReturn.SUCCESS:
+            return ret
+        self._emergency_pub.publish(Bool(data=False))
+        return ret
 
     def on_deactivate(
         self, state: LifecycleState
@@ -294,13 +317,14 @@ class ControlNode(BaseLifecycleNode):
             self.destroy_timer(self._tick_timer)
         self._tick_timer = None
         for pub in (self._cmd_pub, self._emergency_pub,
-                    self._v_set_pub, self._kappa_max_pub):
+                    self._v_set_pub, self._kappa_max_pub, self._latency_pub):
             if pub is not None:
                 self.destroy_publisher(pub)
         self._cmd_pub = None
         self._emergency_pub = None
         self._v_set_pub = None
         self._kappa_max_pub = None
+        self._latency_pub = None
         self._tf_listener = None
         self._tf_buffer = None
         self._drive = None
@@ -538,7 +562,11 @@ class ControlNode(BaseLifecycleNode):
         across laps."""
         if self._stop_latched or self._latest_pose is None:
             return
-        if len(msg.markers) < 2:
+        # cone_detection_node leads every array with a pose-less DELETEALL
+        # marker (viewer refresh); only ADD markers are cones. Including the
+        # leader in the centroid would pull the gate toward the origin.
+        cones = [m for m in msg.markers if m.action != Marker.DELETEALL]
+        if len(cones) < 2:
             return
         if self._travelled < self.get_parameter("stop_latch_min_travel").value:
             return
@@ -556,9 +584,9 @@ class ControlNode(BaseLifecycleNode):
         if not self._final_lap:
             return
         # Centroid in base_link
-        n = len(msg.markers)
-        sx = sum(m.pose.position.x for m in msg.markers) / n
-        sy = sum(m.pose.position.y for m in msg.markers) / n
+        n = len(cones)
+        sx = sum(m.pose.position.x for m in cones) / n
+        sy = sum(m.pose.position.y for m in cones) / n
         # base_link → odom using current absolute pose from SLAM
         o = self._latest_pose
         q = o.pose.pose.orientation
@@ -587,6 +615,7 @@ class ControlNode(BaseLifecycleNode):
         # Default: zero output. Anything that fails below leaves the car
         # commanding nothing rather than the previous tick's cached
         # response — fail-safe under SLAM/path dropout.
+        t0 = time.perf_counter()
         cmd = ControlCommand()
         cmd.throttle = 0.0
         cmd.steering = 0.0
@@ -600,6 +629,7 @@ class ControlNode(BaseLifecycleNode):
 
         if state is None or ref.empty:
             self._cmd_pub.publish(cmd)
+            self._publish_latency_ms(t0)
             return
 
         # Accumulate travel distance — used by the stop-latch guard to
@@ -624,6 +654,7 @@ class ControlNode(BaseLifecycleNode):
         # any internal accumulator (PI integral) lives on the drive controller.
         if self._drive is None:
             self._cmd_pub.publish(cmd)
+            self._publish_latency_ms(t0)
             return
 
         act = self._drive.compute(state, ref)
@@ -710,6 +741,21 @@ class ControlNode(BaseLifecycleNode):
                 f"path_n={len(ref.x)} path_len={ref.length:.1f}m "
                 f"stop_d={ref.stop_distance:.1f} latched={ref.stop_latched}"
             )
+        self._publish_latency_ms(t0)
+
+    def _publish_latency_ms(self, t0: float) -> None:
+        if self._latency_pub is None:
+            return
+        getter = getattr(self._latency_pub, "get_subscription_count", None)
+        if getter is not None:
+            try:
+                if int(getter()) <= 0:
+                    return
+            except Exception:
+                pass
+        msg = Float32()
+        msg.data = (time.perf_counter() - t0) * 1000.0
+        self._latency_pub.publish(msg)
 
     def _build_state(self) -> Optional[VehicleState]:
         """Compose VehicleState from two sources:

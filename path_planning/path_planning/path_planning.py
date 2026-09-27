@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import List, Optional
 
 import rclpy
@@ -68,6 +69,7 @@ from tf2_ros.transform_listener import TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import Point, PoseStamped
+from std_msgs.msg import Float32
 
 from transforms3d.euler import quat2euler, euler2quat
 
@@ -185,6 +187,12 @@ class PathPlanningNode(BaseLifecycleNode):
         # I/O references — populated in on_configure / on_activate.
         self.publisher_path = None
         self.publisher_debug = None
+        self._pub_hz = None
+        self._pub_latency_ms = None
+        self._pub_n_waypoints = None
+        self._pub_length_m = None
+        self._pub_empty = None
+        self._pub_tf_miss = None
         self._sub = None
 
         self.tf_buffer: Optional[Buffer] = None
@@ -242,9 +250,26 @@ class PathPlanningNode(BaseLifecycleNode):
         # left/right. Frame matches /Path (`odom`).
         self.publisher_debug = self.create_lifecycle_publisher(
             MarkerArray, "/path_planning/debug", 10)
+        self._pub_hz = self.create_lifecycle_publisher(
+            Float32, "/path_planning/hz", 10)
+        self._pub_latency_ms = self.create_lifecycle_publisher(
+            Float32, "/path_planning/latency_ms", 10)
+        self._pub_n_waypoints = self.create_lifecycle_publisher(
+            Float32, "/path_planning/n_waypoints", 10)
+        self._pub_length_m = self.create_lifecycle_publisher(
+            Float32, "/path_planning/length_m", 10)
+        self._pub_empty = self.create_lifecycle_publisher(
+            Float32, "/path_planning/empty", 10)
+        self._pub_tf_miss = self.create_lifecycle_publisher(
+            Float32, "/path_planning/tf_miss", 10)
 
         self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
+        # spin_thread=False: this process already rclpy.spin()s the node.
+        # Humble's TransformListener default (True) adds the same node to a
+        # second executor, so every /tf sample is inserted twice and the
+        # second hit logs TF_OLD_DATA (equal timestamps are "from the past").
+        self.tf_listener = TransformListener(
+            self.tf_buffer, self, spin_thread=False)
 
         self._adapter = FasttubeAdapter(mission_type)
         self.get_logger().info(
@@ -301,11 +326,26 @@ class PathPlanningNode(BaseLifecycleNode):
         if self._sub is not None:
             self.destroy_subscription(self._sub)
             self._sub = None
-        for pub in (self.publisher_path, self.publisher_debug):
+        for pub in (
+            self.publisher_path,
+            self.publisher_debug,
+            self._pub_hz,
+            self._pub_latency_ms,
+            self._pub_n_waypoints,
+            self._pub_length_m,
+            self._pub_empty,
+            self._pub_tf_miss,
+        ):
             if pub is not None:
                 self.destroy_publisher(pub)
         self.publisher_path = None
         self.publisher_debug = None
+        self._pub_hz = None
+        self._pub_latency_ms = None
+        self._pub_n_waypoints = None
+        self._pub_length_m = None
+        self._pub_empty = None
+        self._pub_tf_miss = None
         self.tf_listener = None
         self.tf_buffer = None
         self._adapter = None
@@ -353,12 +393,14 @@ class PathPlanningNode(BaseLifecycleNode):
             return
         dt = (now_ns - self._stats_last_log_ns) / 1e9
         d = {k: self._stats[k] - self._stats_prev[k] for k in self._stats}
+        hz = d["callbacks"] / dt if dt > 0.0 else 0.0
         self.get_logger().info(
-            f"PATH_RATE cb={d['callbacks']/dt:4.1f}/s "
+            f"PATH_RATE cb={hz:4.1f}/s "
             f"pub={d['publish']/dt:4.1f}/s "
             f"no_cones={d['no_cones']} tf_miss={d['tf_miss']} "
             f"plan_empty={d['plan_empty']}"
         )
+        self._publish_if_sub(self._pub_hz, hz)
         self._stats_prev = dict(self._stats)
         self._stats_last_log_ns = now_ns
 
@@ -372,6 +414,7 @@ class PathPlanningNode(BaseLifecycleNode):
         if self.publisher_path is None or self._adapter is None:
             return
 
+        t0 = time.perf_counter()
         self._stats["callbacks"] += 1
 
         cones: List[Cone] = []
@@ -386,6 +429,8 @@ class PathPlanningNode(BaseLifecycleNode):
         if not cones:
             self._stats["no_cones"] += 1
             self._maybe_log_stats()
+            self._publish_plan_diag(n_waypoints=0, length_m=0.0, empty=1.0, tf_miss=0.0)
+            self._publish_latency_ms(t0)
             return
 
         # Pose lookup in map frame (Phase 2 — #382). The chain
@@ -399,6 +444,8 @@ class PathPlanningNode(BaseLifecycleNode):
             self.get_logger().warn(f"TF lookup failed: {ex}")
             self._stats["tf_miss"] += 1
             self._maybe_log_stats()
+            self._publish_plan_diag(n_waypoints=0, length_m=0.0, empty=1.0, tf_miss=1.0)
+            self._publish_latency_ms(t0)
             return
 
         yaw = quat2euler([
@@ -441,6 +488,8 @@ class PathPlanningNode(BaseLifecycleNode):
         if not path_points:
             self._stats["plan_empty"] += 1
             self._maybe_log_stats()
+            self._publish_plan_diag(n_waypoints=0, length_m=0.0, empty=1.0, tf_miss=0.0)
+            self._publish_latency_ms(t0)
             return
 
         out = Path()
@@ -450,7 +499,49 @@ class PathPlanningNode(BaseLifecycleNode):
 
         self.publisher_path.publish(out)
         self._stats["publish"] += 1
+        length_m = 0.0
+        for i in range(1, len(path_points)):
+            dx = path_points[i].x - path_points[i - 1].x
+            dy = path_points[i].y - path_points[i - 1].y
+            length_m += (dx * dx + dy * dy) ** 0.5
         self._maybe_log_stats()
+        self._publish_plan_diag(
+            n_waypoints=len(path_points),
+            length_m=length_m,
+            empty=0.0,
+            tf_miss=0.0,
+        )
+        self._publish_latency_ms(t0)
+
+    def _publish_if_sub(self, pub, value: float) -> None:
+        if pub is None:
+            return
+        getter = getattr(pub, "get_subscription_count", None)
+        if getter is not None:
+            try:
+                if int(getter()) <= 0:
+                    return
+            except Exception:
+                pass
+        msg = Float32()
+        msg.data = float(value)
+        pub.publish(msg)
+
+    def _publish_latency_ms(self, t0: float) -> None:
+        self._publish_if_sub(self._pub_latency_ms, (time.perf_counter() - t0) * 1000.0)
+
+    def _publish_plan_diag(
+        self,
+        *,
+        n_waypoints: int,
+        length_m: float,
+        empty: float,
+        tf_miss: float,
+    ) -> None:
+        self._publish_if_sub(self._pub_n_waypoints, float(n_waypoints))
+        self._publish_if_sub(self._pub_length_m, float(length_m))
+        self._publish_if_sub(self._pub_empty, float(empty))
+        self._publish_if_sub(self._pub_tf_miss, float(tf_miss))
 
 
 def main(args=None) -> None:

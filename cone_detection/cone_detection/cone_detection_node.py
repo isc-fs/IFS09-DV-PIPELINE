@@ -9,6 +9,13 @@ Subscribes to /fsds/lidar/Lidar1 (sensor_msgs/PointCloud2) and publishes:
   - /Conos_Orange  — big-orange cones only, kept on a separate stream so the
                      autonomous-stop control logic does not need to filter the
                      full cone list.
+  - /lidar_points/ground — cropped scan after the same RANSAC rotation used
+                     for clustering, floor at z=0 so it overlays /Conos_raw
+                     (includes ground inliers). Published only if subscribed.
+  - /lidar_points/above_ground — RANSAC outliers only (the points clustering
+                     actually sees). Published only if subscribed.
+  - /cone_detection/{hz,latency_ms,ransac_ms,dbscan_ms,fit_ms,n_accepted}
+                     — per-scan / per-second Float32 diagnostics for Lichtblick.
 
 Perception algorithms live in :class:`~cone_detection.strategies.ConeDetectionStrategy`
 implementations (``detect_cones`` → :class:`DetectionResult`). This node parses
@@ -34,6 +41,8 @@ Lifecycle layout (driven by mode_manager → change_state):
 
 from __future__ import annotations
 
+import time
+
 import rclpy
 import numpy as np
 from typing import TYPE_CHECKING
@@ -48,7 +57,8 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import Float32
 from visualization_msgs.msg import Marker, MarkerArray
 
 if TYPE_CHECKING:
@@ -75,6 +85,78 @@ QOS_LATEST = QoSProfile(
     durability=QoSDurabilityPolicy.VOLATILE,
 )
 
+_PERF_TOPICS = (
+    ("hz", "_pub_hz"),
+    ("latency_ms", "_pub_latency_ms"),
+    ("ransac_ms", "_pub_ransac_ms"),
+    ("dbscan_ms", "_pub_dbscan_ms"),
+    ("fit_ms", "_pub_fit_ms"),
+    ("n_accepted", "_pub_n_accepted"),
+    ("n_clusters", "_pub_n_clusters"),
+    ("n_input_points", "_pub_n_input_points"),
+    ("n_after_shape", "_pub_n_after_shape"),
+    ("n_far_dropped", "_pub_n_far_dropped"),
+    ("n_left", "_pub_n_left"),
+    ("n_right", "_pub_n_right"),
+)
+
+
+def _has_subs(pub) -> bool:
+    """True if anyone is listening. Fail-open if the handle has no count API."""
+    if pub is None:
+        return False
+    getter = getattr(pub, "get_subscription_count", None)
+    if getter is None:
+        return True
+    try:
+        return int(getter()) > 0
+    except Exception:
+        return True
+
+
+def _publish_f32(pub, value: float) -> None:
+    if not _has_subs(pub):
+        return
+    msg = Float32()
+    msg.data = float(value)
+    pub.publish(msg)
+
+
+def _publish_cloud(pub, xyz: np.ndarray, stamp: Time) -> None:
+    if not _has_subs(pub):
+        return
+    pub.publish(xyz_to_pointcloud2(xyz, stamp))
+
+
+def xyz_to_pointcloud2(
+    xyz: np.ndarray,
+    stamp: Time,
+    frame_id: str = "base_link",
+) -> PointCloud2:
+    """Pack an ``(N, 3)`` xyz array as a dense xyz32 PointCloud2."""
+    pts = np.ascontiguousarray(np.asarray(xyz, dtype=np.float32))
+    if pts.ndim != 2 or pts.shape[1] < 3:
+        pts = np.zeros((0, 3), dtype=np.float32)
+    else:
+        pts = pts[:, :3]
+    n = int(pts.shape[0])
+    msg = PointCloud2()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame_id
+    msg.height = 1
+    msg.width = n
+    msg.is_dense = True
+    msg.is_bigendian = False
+    msg.point_step = 12
+    msg.row_step = 12 * n
+    msg.fields = [
+        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    msg.data = pts.tobytes()
+    return msg
+
 
 class ConeDetectionNode(BaseLifecycleNode):
     """LifecycleNode publishing per-scan cone observations."""
@@ -90,6 +172,20 @@ class ConeDetectionNode(BaseLifecycleNode):
         self._cone_strategy: ConeDetectionStrategy | None = None
         self._pub_markers = None
         self._pub_orange = None
+        self._pub_ground = None
+        self._pub_above = None
+        self._pub_hz = None
+        self._pub_latency_ms = None
+        self._pub_ransac_ms = None
+        self._pub_dbscan_ms = None
+        self._pub_fit_ms = None
+        self._pub_n_accepted = None
+        self._pub_n_clusters = None
+        self._pub_n_input_points = None
+        self._pub_n_after_shape = None
+        self._pub_n_far_dropped = None
+        self._pub_n_left = None
+        self._pub_n_right = None
         self._sub = None
         self._reset_diag()
 
@@ -120,6 +216,21 @@ class ConeDetectionNode(BaseLifecycleNode):
             self._pub_orange = self.create_lifecycle_publisher(
                 MarkerArray, "Conos_Orange", 10,
             )
+            # Ground-aligned viz cloud (same rotation as /Conos_raw).
+            self._pub_ground = self.create_lifecycle_publisher(
+                PointCloud2, "/lidar_points/ground", QOS_LATEST,
+            )
+            self._pub_above = self.create_lifecycle_publisher(
+                PointCloud2, "/lidar_points/above_ground", QOS_LATEST,
+            )
+            for topic, attr in _PERF_TOPICS:
+                setattr(
+                    self,
+                    attr,
+                    self.create_lifecycle_publisher(
+                        Float32, f"/cone_detection/{topic}", 10
+                    ),
+                )
 
             # Numba JIT compile — dominant cost of bring-up; lives in
             # strategy.configure() during on_configure (not on_activate) so an
@@ -160,12 +271,28 @@ class ConeDetectionNode(BaseLifecycleNode):
         if self._sub is not None:
             self.destroy_subscription(self._sub)
             self._sub = None
-        if self._pub_markers is not None:
-            self.destroy_publisher(self._pub_markers)
-            self._pub_markers = None
-        if self._pub_orange is not None:
-            self.destroy_publisher(self._pub_orange)
-            self._pub_orange = None
+        for attr in (
+            "_pub_markers",
+            "_pub_orange",
+            "_pub_ground",
+            "_pub_above",
+            "_pub_hz",
+            "_pub_latency_ms",
+            "_pub_ransac_ms",
+            "_pub_dbscan_ms",
+            "_pub_fit_ms",
+            "_pub_n_accepted",
+            "_pub_n_clusters",
+            "_pub_n_input_points",
+            "_pub_n_after_shape",
+            "_pub_n_far_dropped",
+            "_pub_n_left",
+            "_pub_n_right",
+        ):
+            pub = getattr(self, attr, None)
+            if pub is not None:
+                self.destroy_publisher(pub)
+                setattr(self, attr, None)
         self._cone_strategy = None
         return super().on_cleanup(state)
 
@@ -218,8 +345,17 @@ class ConeDetectionNode(BaseLifecycleNode):
             return
 
         point_cloud = self.pointcloud2_to_xyz(msg)
-        result = self._cone_strategy.detect_cones(point_cloud)
+        want_ground = _has_subs(self._pub_ground)
+        t0 = time.perf_counter()
+        result = self._cone_strategy.detect_cones(
+            point_cloud, viz_full_cloud=want_ground
+        )
+        total_ms = (time.perf_counter() - t0) * 1000.0
         self._accumulate_diagnostics(result)
+        self._publish_perf(result, total_ms)
+        if want_ground:
+            _publish_cloud(self._pub_ground, result.rotated_xyz, msg.header.stamp)
+        _publish_cloud(self._pub_above, result.outlier_xyz, msg.header.stamp)
         big_orange_threshold = (
             self._cone_strategy.big_orange_height_threshold_m()
         )
@@ -260,6 +396,26 @@ class ConeDetectionNode(BaseLifecycleNode):
         per_scan["accepted_right"] = n_right
         per_scan["accepted_centerline"] = n_centerline
         per_scan["accepted_bigorange"] = n_bigorange
+        result.debug_counters.update(
+            {
+                "accepted_left": n_left,
+                "accepted_right": n_right,
+                "accepted_centerline": n_centerline,
+                "accepted_bigorange": n_bigorange,
+            }
+        )
+
+        if per_scan.get("dbscan_guard_scans", 0):
+            # Loud but throttled: this scan was NOT a cone scene (car facing
+            # terrain / an object, or a bad ground plane). Without the guard
+            # it would have cost seconds and gigabytes — see
+            # ConeDetectionConfig.dbscan_max_points.
+            self.get_logger().warning(
+                "DBSCAN guard: above-ground cloud too large/dense, dropped "
+                f"{per_scan.get('dbscan_guard_dropped', 0)} pts before "
+                "clustering (car off-track or ground plane mis-fit?)",
+                throttle_duration_sec=5.0,
+            )
 
         for k, v in per_scan.items():
             self._diag[k] = self._diag.get(k, 0) + v
@@ -272,6 +428,9 @@ class ConeDetectionNode(BaseLifecycleNode):
             and self._diag_n_scans > 0
         ):
             n = self._diag_n_scans
+            dt_s = (now_ns - self._diag_last_log_ns) / 1e9
+            hz = n / dt_s if dt_s > 0.0 else 0.0
+            _publish_f32(self._pub_hz, hz)
             self.get_logger().info(
                 f"CONE_FILTER (avg/scan over {n}): "
                 f"pts={self._diag.get('n_input_points', 0) / n:5.0f} "
@@ -284,10 +443,27 @@ class ConeDetectionNode(BaseLifecycleNode):
                 f"by-side: L={self._diag.get('accepted_left', 0) / n:4.1f} "
                 f"R={self._diag.get('accepted_right', 0) / n:4.1f} "
                 f"C={self._diag.get('accepted_centerline', 0) / n:.1f} "
-                f"BO={self._diag.get('accepted_bigorange', 0) / n:.1f}"
+                f"BO={self._diag.get('accepted_bigorange', 0) / n:.1f} "
+                f"dbscan_guard={self._diag.get('dbscan_guard_scans', 0)}/{n} "
+                f"hz={hz:4.1f}"
             )
             self._reset_diag()
             self._diag_last_log_ns = now_ns
+
+    def _publish_perf(self, result: DetectionResult, total_ms: float) -> None:
+        st = result.stage_timings
+        _publish_f32(self._pub_latency_ms, total_ms)
+        _publish_f32(self._pub_ransac_ms, float(st.get("ransac_ms", 0.0)))
+        _publish_f32(self._pub_dbscan_ms, float(st.get("dbscan_ms", 0.0)))
+        _publish_f32(self._pub_fit_ms, float(st.get("fit_ms", 0.0)))
+        _publish_f32(self._pub_n_accepted, float(len(result.cones)))
+        dc = result.debug_counters
+        _publish_f32(self._pub_n_clusters, float(dc.get("n_clusters", 0)))
+        _publish_f32(self._pub_n_input_points, float(dc.get("n_input_points", 0)))
+        _publish_f32(self._pub_n_after_shape, float(dc.get("after_shape_gate", 0)))
+        _publish_f32(self._pub_n_far_dropped, float(dc.get("far_dropped", 0)))
+        _publish_f32(self._pub_n_left, float(dc.get("accepted_left", 0)))
+        _publish_f32(self._pub_n_right, float(dc.get("accepted_right", 0)))
 
     @staticmethod
     def _cones_to_markers(
@@ -296,9 +472,26 @@ class ConeDetectionNode(BaseLifecycleNode):
         stamp: Time,
         big_orange_threshold_m: float,
     ) -> tuple[MarkerArray, MarkerArray]:
-        """Build /Conos_raw and /Conos_Orange MarkerArrays from detections."""
+        """Build /Conos_raw and /Conos_Orange MarkerArrays from detections.
+
+        Both arrays start with a dedicated pose-less ``DELETEALL`` leader
+        so RViz/Foxglove drop the previous scan's cubes, followed by one
+        ``ADD`` marker per cone. The leader carries no cone: every
+        consumer (slam_node, control_node, path_planning) skips markers
+        with ``action == DELETEALL``, so a cone must never ride on it.
+        (Before this, the first *real* cone was emitted as the DELETEALL
+        marker itself and SLAM silently dropped one cone per scan.)
+        """
         marker_array = MarkerArray()
         orange_array = MarkerArray()
+
+        for arr in (marker_array, orange_array):
+            clear = Marker()
+            clear.header.frame_id = "base_link"
+            clear.header.stamp = stamp
+            clear.action = Marker.DELETEALL
+            arr.markers.append(clear)
+
         marker_index = 0
         orange_index = 0
 
@@ -312,8 +505,7 @@ class ConeDetectionNode(BaseLifecycleNode):
             # /Conos_raw is published in the body frame; SLAM transforms to map.
             marker.header.frame_id = "base_link"
             marker.type = Marker.CUBE
-            # First marker clears whatever RViz/Foxglove held (DELETEALL).
-            marker.action = Marker.DELETEALL if marker_index == 0 else Marker.ADD
+            marker.action = Marker.ADD
             marker.header.stamp = stamp
             # marker.scale carries per-cone metadata for downstream SLAM:
             #   scale.x → σ_xy in metres (position uncertainty); sigma_xy < 0
@@ -339,9 +531,7 @@ class ConeDetectionNode(BaseLifecycleNode):
                 orange.header.frame_id = "base_link"
                 orange.header.stamp = stamp
                 orange.type = Marker.CUBE
-                orange.action = (
-                    Marker.DELETEALL if orange_index == 0 else Marker.ADD
-                )
+                orange.action = Marker.ADD
                 orange.pose.position.x = cone.x
                 orange.pose.position.y = cone.y
                 orange.pose.position.z = 0.0

@@ -229,6 +229,17 @@ struct EkfParams {
   // straight. (Tried 1e-3 first — killed the +44° first-turn jump
   // on bag _235642 but introduced -100° overcorrection mid-run on
   // bag _001700. 1e-4 splits the difference.)
+  //
+  // NOTE (post-#555): the paragraph above describes the pre-#555
+  // filter. #555 zeroes K[BG_Z] in *every* correction (RPM, NHC,
+  // steering — Schmidt-Kalman partition), so after calibration NO
+  // measurement moves bg_z any more: the state holds the stationary-
+  // calibration value for the whole run. This density therefore only
+  // inflates P[BG_Z] (and, through F[THETA, BG_Z] = -dt, P[THETA]) —
+  // it is a covariance-honesty knob for /odom.pose.covariance, not a
+  // tracking-speed knob. Re-enabling bg_z tracking would mean keeping
+  // K[BG_Z] in correct_steering() (the only measurement that actually
+  // observes ω), which needs bag validation before it is turned on.
   double sigma_bg_walk = 1.0e-4;  // gyro bias random-walk
 
   // Measurement noise std-devs.
@@ -382,11 +393,24 @@ class OdometryFilter {
   // prediction from the latest steering angle. Gated: rejects when
   // |z − ω| > slip_yaw_residual_threshold and raises slip_flag.
   // Always updates diagnostics (yaw_residual + slip_flag).
+  //
+  // Effect on the estimate (be aware when tuning sigma_steer): the
+  // update touches x[OMEGA] only (K is partitioned to OMEGA, #555),
+  // and predict_step() re-assigns x[OMEGA] = ω̃_z − bg_z from the gyro
+  // on the very next IMU tick (F[OMEGA, *] = 0 except F[OMEGA, BG_Z]),
+  // which also rebuilds the OMEGA row/column of P. So the correction
+  // persists for at most one IMU interval (~2.5 ms) — it nudges the
+  // yaw_rate that /odom happens to publish in that window and nothing
+  // else. Its lasting outputs are the diagnostics and, via slip_flag,
+  // the NHC sigma selection in correct_nhc(). θ and bg_z are NOT
+  // corrected by steering in the current partition.
   void correct_steering();
 
-  // Non-holonomic-constraint pseudo-measurement: z = 0, h = vy. Gated
-  // by slip_flag (the caller skips when slipping). This is the only
-  // direct observation of vy — without it, bias-noise integration
+  // Non-holonomic-constraint pseudo-measurement: z = 0, h = vy. Applied
+  // on every post-calibration IMU tick; slip-aware — uses sigma_vy_nhc
+  // normally and the looser sigma_vy_nhc_slip while slip_flag is set
+  // (it is no longer gated off under slip, see push_imu). This is the
+  // only direct observation of vy — without it, bias-noise integration
   // drives vy unbounded over seconds (see correct_nhc impl comment).
   void correct_nhc();
 

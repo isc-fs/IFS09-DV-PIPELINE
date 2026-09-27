@@ -52,14 +52,32 @@ _FOXGLOVE_TOPIC_WHITELIST = [
     "/Conos", "/Conos_full", "/Conos_Orange", "/Conos_raw",
     # Planner output + debug
     "/Path", "/path_planning/debug",
+    "/path_planning/hz", "/path_planning/latency_ms",
+    "/path_planning/n_waypoints", "/path_planning/length_m",
+    "/path_planning/empty", "/path_planning/tf_miss",
     # SLAM
     "/slam/pose", "/cone_slam/gt_aligned",
     "/cone_slam/gt_error_m",
+    "/cone_slam/hz", "/cone_slam/latency_ms",
+    "/cone_slam/age_ms", "/cone_slam/commit_ms", "/cone_slam/map_size",
+    "/cone_slam/n_obs",
+    "/slam/finished", "/slam/final_lap", "/slam/stop_request",
+    "/odom", "/odom_diag/yaw_residual_rad_s",
+    "/odom_diag/slip_flag", "/odom_diag/effective_alpha_vx",
     # Controller diagnostics
     "/control/v_set_mps", "/control/kappa_max_per_m",
+    "/control/latency_ms",
     "/ctrl/cmd_internal",
     # Sensors actually plotted (no full LiDAR — viz only)
-    "/lidar_points/viz", "/imu", "/motor_rpm",
+    "/lidar_points/viz", "/lidar_points/ground", "/lidar_points/above_ground",
+    "/imu", "/motor_rpm",
+    # Perception / pipeline timings
+    "/cone_detection/hz", "/cone_detection/latency_ms",
+    "/cone_detection/ransac_ms", "/cone_detection/dbscan_ms",
+    "/cone_detection/fit_ms", "/cone_detection/n_accepted",
+    "/cone_detection/n_clusters", "/cone_detection/n_input_points",
+    "/cone_detection/n_after_shape", "/cone_detection/n_far_dropped",
+    "/cone_detection/n_left", "/cone_detection/n_right",
     # Diagnostic GT
     "/testing_only/odom", "/testing_only/track",
     # Lichtblick built-ins (interactive feature topics)
