@@ -1,0 +1,109 @@
+# Default parameters of the pipeline's nodes. Every launch (sim and car) loads this file into the
+# nodes that declare parameters (bringup/bringup/launch_common.py: node_parameters()), so these are
+# the values that run.
+#
+# The same defaults are also in each node's declare_parameter() calls: ROS needs every parameter
+# declared, and a node started without this file (unit tests, `ros2 run`) falls back to them.
+# bringup/test/test_params_file.py fails if the two disagree, so change a default in BOTH places.
+#
+# To run with other values without editing this file, pass another params file after it
+# (later files win), e.g. `--ros-args --params-file my_overrides.yaml`: that is how benchmarks
+# apply their overrides.
+#
+# Deliberately NOT listed here:
+#   slam_node.debug_gt_cones        default computed at runtime (DV_SLAM_GT_CONES)
+#   mission_control_node.free_run, .hard_stop_on_finish
+#                                   launch switches (car_bringup free_run:= / hard_stop_on_finish:=);
+#                                   hard_stop_on_finish is safety-critical, see docs/HARD_STOP.md
+
+
+# control/control/control_node.py
+control_node:
+  ros__parameters:
+    drive_controller: composite
+    lateral_controller: pure_pursuit
+    longitudinal_controller: pi_velocity
+    v_max: 3.0  # tuning experiment — completable-lap baseline
+    a_lat_max: 3.0
+    a_dec_max: 4.0
+    lookahead_min: 1.0
+    lookahead_k: 0.5
+    stanley_k: 2.0
+    stanley_k_soft: 1.5
+    stanley_k_yaw_rate: 0.5
+    stanley_k_damp_steer: 0.2
+    wheelbase: 1.627
+    max_steer_deg: 18.2  # road-wheel ceiling = column limit 100 deg / effective ratio 5.5; MUST match uDV MAX_STEER_ROADWHEEL_DEG (#59, uDV#172)
+    kp_v: 0.5
+    ki_v: 0.05
+    deadband_v: 0.05
+    throttle_max: 0.2
+    v_meas_tau: 0.15
+    v_meas_max_accel: 20.0
+    throttle_rate: 2.0
+    regen_rate: 3.33
+    steering_rate: 5.0
+    stop_latch_min_travel: 30.0
+
+# cone_slam/cone_slam/cone_graph_slam_node.py
+slam_node:
+  ros__parameters:
+    map_frame: map
+    odom_frame: odom
+    base_frame: base_link
+    motion_model: odom
+    pose_jump_max_pos_m: 0.8
+    pose_jump_max_yaw_rad: 0.3
+    new_landmark_proximity_veto_m: 1.5
+    imu_calibration_seconds: 3.0
+    cascade_spike_new_count_threshold: 3
+    min_observations_for_publish: 3
+    cone_map_publish_radius_m: 25.0
+    cone_map_full_publish_every_n_scans: 50
+    cascade_skip_recovery_threshold: 5
+    freeze_mapping_on_loop_close: true
+    loop_close_radius_m: 6.0
+    loop_close_min_radius_m: 15.0
+    localization_only_after_loop_close: true
+    loc_prior_sigma_xy_m: 0.3
+    loc_prior_sigma_yaw_rad: 0.05
+    laps_to_finish: -1
+    finish_distance_m: -1.0
+    finish_standstill_speed_mps: 0.5
+    debug_gt_range_m: 25.0
+    debug_gt_min_range_m: 0.5
+    debug_gt_hfov_deg: 60.0
+
+# odometry_filter_node/src/odometry_filter_node.cpp
+odometry_filter_node:
+  ros__parameters:
+    publish_hz: 100.0
+    odom_frame: odom
+    base_frame: base_link
+    ekf:
+      wheelbase_m: 1.57
+      rpm_to_ms: 0.00727
+      calibration_seconds: 3.0
+      sigma_ax: 0.05
+      sigma_ay: 0.05
+      sigma_gz: 0.01
+      sigma_ba_walk: 0.0001
+      sigma_bg_walk: 0.0001
+      sigma_rpm: 0.02
+      sigma_steer: 0.3
+      sigma_vy_nhc: 0.1
+      sigma_vy_nhc_slip: 0.5
+      slip_yaw_residual_threshold: 0.3
+      min_vx_for_steering_correct: 3.0
+
+# pipeline_watchdog/pipeline_watchdog/pipeline_watchdog_node.py
+pipeline_watchdog_node:
+  ros__parameters:
+    pose_max_silence_s: 0.6  # ~10 Hz → 6 missed
+    odom_max_silence_s: 0.5  # high rate → 0.5 s is many
+    cmd_max_silence_s: 0.5  # 40 Hz → 20 missed
+    grace_period_s: 5.0
+    pose_progress_enabled: true
+    pose_progress_min_speed_mps: 1.0
+    pose_progress_min_travel_m: 0.5
+    pose_progress_window_s: 1.5

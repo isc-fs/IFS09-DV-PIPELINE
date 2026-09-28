@@ -43,9 +43,14 @@ Public API used by the launch files:
   watchdog_action()      The independent pipeline supervisor — a plain
                          Node (never lifecycle) so mode_manager cannot
                          tear down the thing that watches it.
+
+  node_parameters(...)   The `parameters=` every node gets: use_sim_time
+                         plus bringup/config/params.yaml, the nodes'
+                         default parameters (see that file's header).
 """
 from __future__ import annotations
 
+import os
 from typing import Iterable
 
 from launch.actions import EmitEvent, RegisterEventHandler
@@ -88,6 +93,32 @@ def use_sim_time_params() -> list:
     }]
 
 
+def params_file() -> str:
+    """bringup/config/params.yaml: from the installed package, or from the source
+    tree when running out of a checkout (no install)."""
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        path = os.path.join(get_package_share_directory("bringup"), "config", "params.yaml")
+        if os.path.isfile(path):
+            return path
+    except (ImportError, LookupError):  # PackageNotFoundError is a KeyError
+        pass
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "params.yaml")
+
+
+def node_parameters(extra: list | None = None) -> list:
+    """`parameters=` for a pipeline node: use_sim_time, then params.yaml, then
+    `extra` (later entries win, so a launch argument like mission_control's
+    free_run still overrides the file).
+
+    params.yaml has one section per node; a node only reads its own, so every
+    node can be given the whole file.
+    """
+    return use_sim_time_params() + [params_file()] + list(extra or [])
+
+
 # Topic remap constants live in bringup.topic_contract (a dependency-free
 # module so the contract is unit-testable without a ROS install). The
 # names used directly below by management_actions are imported at the top
@@ -109,8 +140,8 @@ def auto_active(
     endpoints must be live before mode_manager fans out change_state
     to the autonomy nodes.
 
-    `parameters` are appended after use_sim_time (e.g. mission_control's
-    free_run flag); each launch file owns what it passes.
+    `parameters` are appended after use_sim_time and params.yaml (e.g.
+    mission_control's free_run flag); each launch file owns what it passes.
     """
     node = LifecycleNode(
         package=package,
@@ -119,7 +150,7 @@ def auto_active(
         namespace="",
         output="screen",
         remappings=list(remappings or []),
-        parameters=use_sim_time_params() + list(parameters or []),
+        parameters=node_parameters(parameters),
     )
     configure = EmitEvent(event=ChangeState(
         lifecycle_node_matcher=matches_action(node),
@@ -156,7 +187,7 @@ def autonomy_lifecycle(
         namespace="",
         output="screen",
         remappings=list(remappings or []),
-        parameters=use_sim_time_params(),
+        parameters=node_parameters(),
     )
 
 
@@ -233,7 +264,7 @@ def watchdog_action() -> list:
         name="pipeline_watchdog_node",
         namespace="",
         output="screen",
-        parameters=use_sim_time_params(),
+        parameters=node_parameters(),
     )]
 
 

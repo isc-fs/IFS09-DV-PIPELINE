@@ -17,6 +17,9 @@ setup(
         # `ros2 launch bringup <name>.launch.py` resolves them.
         (os.path.join("share", package_name, "launch"),
             glob(os.path.join("launch", "*.launch.py"))),
+        # The nodes' default parameters, loaded by launch_common.node_parameters().
+        (os.path.join("share", package_name, "config"),
+            glob(os.path.join("config", "*.yaml"))),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
