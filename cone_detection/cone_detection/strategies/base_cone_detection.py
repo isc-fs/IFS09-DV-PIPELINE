@@ -36,11 +36,14 @@ class BaseConeDetection(ConeDetectionStrategy):
     # residual stats). Set to 0 to disable. At 20 Hz, N=20 ≈ 1 Hz.
     LOG_FIT_COMPARISON_EVERY_N = 20
 
-    def __init__(self, logger: Any) -> None:
+    def __init__(self, logger: Any, config: ConeDetectionConfig | None = None) -> None:
+        """``config``: the node's settings (its ROS parameters over this strategy's own
+        ``CONE_DETECTION_CONFIG``); None keeps the strategy's."""
         self._log = logger
         self._numba_warmup_done = False
         self._scan_count = 0
-        self._detector = RealtimeConeDetector(self.CONE_DETECTION_CONFIG)
+        self._config = config or self.CONE_DETECTION_CONFIG
+        self._detector = RealtimeConeDetector(self._config)
 
     def big_orange_height_threshold_m(self) -> float:
         return self.BIG_ORANGE_HEIGHT_THRESHOLD_M
@@ -53,7 +56,7 @@ class BaseConeDetection(ConeDetectionStrategy):
             self._log.info(
                 "warming up Numba kernels (~1-2 s cached, 10-20 s first ever)"
             )
-            warmup_numba_functions(config=self.CONE_DETECTION_CONFIG)
+            warmup_numba_functions(config=self._config)
             self._numba_warmup_done = True
             self._log.info("Numba warmup complete")
 
