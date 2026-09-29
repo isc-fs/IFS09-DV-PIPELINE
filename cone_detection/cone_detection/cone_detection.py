@@ -79,18 +79,6 @@ def plane_floor_z(plane_coefs: np.ndarray) -> float:
     )
 
 
-def shift_rotated_ground_z0(
-    xyz: np.ndarray,
-    plane_coefs: np.ndarray,
-) -> np.ndarray:
-    """Shift an already-rotated cloud so the fitted floor sits at z=0."""
-    if xyz is None or len(xyz) == 0:
-        return np.zeros((0, 3), dtype=np.float32)
-    out = np.ascontiguousarray(np.asarray(xyz, dtype=np.float32)[:, :3], dtype=np.float32)
-    out[:, 2] -= np.float32(plane_floor_z(plane_coefs))
-    return out
-
-
 def rotate_xyz_to_ground(
     xyz: np.ndarray,
     plane_coefs: np.ndarray,
@@ -148,6 +136,15 @@ class ConeDetectionConfig:
     # ATX returns (far ground) before the O(n) clustering — the dominant cost.
     # Set to 0 to disable.
     input_range_crop_m: float = 25.0
+
+    # Drop returns closer than this 3D range (m) before anything else. The
+    # Hesai ATX driver keeps every firing slot in the cloud and encodes "no
+    # return" as (0, 0, 0): ~14% of a real scan (24.6k of 174k) sat at the
+    # sensor origin. After the ground shift those land ~1 m above the floor,
+    # where the tall-column veto silently discarded them, and they still cost
+    # RANSAC time. 0.1 m is far inside the sensor's blind zone, so no real
+    # return is lost. Set to 0 to disable.
+    input_min_range_m: float = 0.1
 
     # Confidence margin (residual_other / residual_min) for template_dispatch
     # ambiguity. Ignored when ``res_other`` is not finite (e.g. two_param path).
@@ -370,7 +367,8 @@ def clustering_separation_rt(
     """Ground removal + rotation correction + DBSCAN, single scan.
 
     RANSAC fits the ground plane (``ransac2`` on augmented ``[1,x,y,z]``), outliers
-    are rotated so the plane normal aligns with +z, then DBSCAN clusters them.
+    are rotated so the plane normal aligns with +z and shifted so the plane is
+    z=0 (z = height above ground), then DBSCAN clusters them.
 
     Args:
         initial_plane: optional previous-scan plane coefficients
@@ -380,7 +378,8 @@ def clustering_separation_rt(
 
     Returns:
         ``(labels, rotated_outliers, plane_coefs)`` — per-point cluster labels,
-        outlier points after rotation, and ``[bias, n_x, n_y, n_z]`` plane coeffs.
+        outlier points after rotation and ground shift (ground at z=0), and
+        ``[bias, n_x, n_y, n_z]`` plane coeffs.
     """
     cfg = config or ConeDetectionConfig()
     A = np.c_[np.ones(data.shape[0]), data]
@@ -406,6 +405,12 @@ def clustering_separation_rt(
     # right-multiplied rotation, and rotating only the ~1% above-ground
     # points instead of the full cloud removes the dominant cost here.
     data = data[outliers] @ ground_rotation_matrix(def_coefs)
+    # Shift so the fitted plane IS the xy plane: every consumer downstream
+    # (floor cull, column veto, template fit) reads z as height above ground.
+    # The templates fix the apex at d = 0.35 / 0.55 m above ground, so leaving
+    # the sensor at z=0 fits the cone ~1 m too high on the car (Hesai mounted
+    # ~1.07 m up); the sim LiDAR sits at ground level, which hid this.
+    data[:, 2] -= plane_floor_z(def_coefs)
     if stage_timings is not None:
         stage_timings["rotate_ms"] = (time.perf_counter() - t_rotate) * 1000.0
         stage_timings["n_outliers"] = float(len(data))
@@ -416,12 +421,8 @@ def clustering_separation_rt(
         return np.array([]), data, def_coefs
     if cfg.tall_column_veto:
         t_veto = time.perf_counter()
-        # Ground height in the rotated frame: distance from the LiDAR origin
-        # to the plane (same formula as the per-cluster floor cull below).
-        v = np.array([0, 0, -1 * def_coefs[0]])
-        w = np.array(def_coefs[1:])
-        floor_z = np.dot(v, w) / np.linalg.norm(w)
-        keep = _tall_column_veto_mask(data[:, :2], data[:, 2] - floor_z, cfg)
+        # z is already height above the fitted ground (shifted above).
+        keep = _tall_column_veto_mask(data[:, :2], data[:, 2], cfg)
         n_vetoed = 0
         if keep is not None:
             n_vetoed = int(len(keep) - keep.sum())
@@ -491,9 +492,15 @@ class RealtimeConeDetector:
         # instead of clustering ~1000 far groups just to discard them by the
         # range gate. Uses squared radius (no sqrt). Behavior-preserving for
         # crop radius > range_gate_max_m + cone extent.
-        if cfg.input_range_crop_m > 0:
+        # The same pass drops no-return points (see input_min_range_m).
+        if cfg.input_range_crop_m > 0 or cfg.input_min_range_m > 0:
             r2 = data[:, 0] ** 2 + data[:, 1] ** 2
-            data = data[r2 <= cfg.input_range_crop_m ** 2]
+            keep = np.ones(len(data), dtype=bool)
+            if cfg.input_range_crop_m > 0:
+                keep &= r2 <= cfg.input_range_crop_m ** 2
+            if cfg.input_min_range_m > 0:
+                keep &= r2 + data[:, 2] ** 2 >= cfg.input_min_range_m ** 2
+            data = data[keep]
             if len(data) == 0:
                 return []
         if debug_counters is not None:
@@ -515,10 +522,10 @@ class RealtimeConeDetector:
             debug_counters["dbscan_guard_dropped"] = dropped
             debug_counters["dbscan_guard_scans"] = int(dropped > 0)
         self._prev_plane = def_coefs
-        # Outliers are already rotated inside clustering_separation_rt.
-        # Only the z-shift is extra; the full-crop rotate is deferred
-        # until a viz subscriber actually wants /lidar_points/ground.
-        self.last_outlier_xyz = shift_rotated_ground_z0(clean_data, def_coefs)
+        # Outliers are already rotated and ground-shifted inside
+        # clustering_separation_rt; the full-crop rotate is deferred until a
+        # viz subscriber actually wants /lidar_points/ground.
+        self.last_outlier_xyz = np.ascontiguousarray(clean_data, dtype=np.float32)
         if viz_full_cloud:
             self.last_rotated_xyz = rotate_xyz_to_ground(data, def_coefs)
         if len(labels) == 0:
@@ -552,17 +559,13 @@ class RealtimeConeDetector:
         residuals_kept: list[float] = []
         t_fit = time.perf_counter()
 
-        v = np.array([0, 0, -1 * def_coefs[0]])
-        w = np.array(def_coefs[1:])
-        lidar_distance_to_floor = np.dot(v, w) / np.linalg.norm(w)
-
         for cone in separated_data:
             if len(cone) < cfg.min_cluster_points:
                 continue
             if debug_counters is not None:
                 debug_counters["after_min_pts"] += 1
 
-            clean_cone = cone[cone[:, 2] > cfg.floor_margin_m + lidar_distance_to_floor]
+            clean_cone = cone[cone[:, 2] > cfg.floor_margin_m]
             if len(clean_cone) == 0:
                 continue
 
@@ -591,7 +594,7 @@ class RealtimeConeDetector:
                 clean_cone,
                 cfg,
                 cluster_height_m=cluster_height,
-                ground_z=float(lidar_distance_to_floor),
+                ground_z=0.0,
             )
             if not (np.isfinite(res_min) and res_min <= cfg.residual_gate_mse):
                 n_residual_rejected += 1
