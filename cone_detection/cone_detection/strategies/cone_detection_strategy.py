@@ -26,12 +26,22 @@ class ConeObservation:
     sigma_xy: float = -1.0
 
 
+def _empty_xyz() -> np.ndarray:
+    return np.zeros((0, 3), dtype=np.float32)
+
+
 @dataclass
 class DetectionResult:
     """Per-scan output from a strategy (no ROS types)."""
 
     cones: list[ConeObservation] = field(default_factory=list)
     debug_counters: dict[str, int] = field(default_factory=dict)
+    # Cropped scan after the same RANSAC ground rotation used for
+    # clustering, floor shifted to z=0 so it lines up with /Conos_raw.
+    rotated_xyz: np.ndarray = field(default_factory=_empty_xyz)
+    # RANSAC outliers only (ground inliers removed), same frame as cones.
+    outlier_xyz: np.ndarray = field(default_factory=_empty_xyz)
+    stage_timings: dict[str, float] = field(default_factory=dict)
 
 
 class ConeDetectionStrategy(ABC):
@@ -47,8 +57,19 @@ class ConeDetectionStrategy(ABC):
         """One-shot setup (e.g. Numba JIT warmup) during lifecycle configure."""
 
     @abstractmethod
-    def detect_cones(self, point_cloud: np.ndarray) -> DetectionResult:
-        """Detect cones from an ``(N, 3)`` point cloud in the sensor frame."""
+    def detect_cones(
+        self,
+        point_cloud: np.ndarray,
+        *,
+        viz_full_cloud: bool = False,
+    ) -> DetectionResult:
+        """Detect cones from an ``(N, 3)`` point cloud in the sensor frame.
+
+        ``viz_full_cloud`` asks for the full RANSAC-rotated crop on
+        ``DetectionResult.rotated_xyz`` (the /lidar_points/ground path).
+        Skip it when nobody is subscribed — the 15 k-point rotate is
+        otherwise wasted. ``outlier_xyz`` is always filled.
+        """
 
     def big_orange_height_threshold_m(self) -> float:
         """Height above which a cone goes to /Conos_Orange (strategy-specific)."""

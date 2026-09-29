@@ -16,7 +16,9 @@ plays the uDV.
                                    stand-in for the old SetMission /
                                    RuntimeControl action Results
     /ctrl/cmd     geometry_msgs/Twist  normalised command:
-                                   linear.x = throttle [-1, 1],
+                                   linear.x = throttle - regen [-1, 1]
+                                     (x > 0 → throttle = x, regen = 0;
+                                      x < 0 → throttle = 0, regen = -x),
                                    angular.z = steering [-1, 1]
     /force_ebs    std_srvs/SetBool (service)  emergency-brake request
 

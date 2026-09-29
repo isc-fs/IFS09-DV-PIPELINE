@@ -47,7 +47,7 @@ type here is in the standard micro-ROS interface set.
 | Name | Type | Notes |
 |---|---|---|
 | `/dv/status` | `std_msgs/UInt8` | pipeline lifecycle byte (IDLE/PREPARING/READY/RUNNING/FINISHED/EMERGENCY/FAILED). The prepare/run **handshake** — the uDV gates "go" on `READY`. **Publish ≥2 Hz** (the uDV's liveness watchdog on the DVPC). |
-| `/ctrl/cmd` | `geometry_msgs/Twist` | normalised command: `linear.x`=throttle, `angular.z`=steering, both [-1,1]. The uDV scales to physical units + clamps + actuates **only while AS Driving**. |
+| `/ctrl/cmd` | `geometry_msgs/Twist` | normalised command: `linear.x` = signed drive demand `throttle − regen` in [-1,1] (x>0 → throttle, x<0 → regen/brake of magnitude −x; the controller never asks for both at once), `angular.z`=steering [-1,1]. The uDV splits `linear.x` back into the two channels, scales to physical units + clamps + actuates **only while AS Driving**. |
 | `/force_ebs` | `std_srvs/SetBool` (service, **served by the uDV**) | mission_control requests EBS here on emergency. |
 
 The two `UInt8` byte topics are each other's heartbeats: a stale
@@ -140,10 +140,14 @@ units / sign / pole-pairs, publish `/motor_rpm` (motor-shaft RPM). Set
 gear ratio (the sim default `0.00821` is almost certainly wrong).
 
 ### G2 — Throttle actuation sink
-`/ctrl/cmd` carries throttle (`linear.x`) + steering (`angular.z`); the
-uDV currently has **no throttle ROS subscriber** (only steering). Add the
-inverter torque/accel path (e.g. the `0x507` accel frame). Proportional
-braking is out of scope; only emergency EBS is wired (`/force_ebs`).
+`/ctrl/cmd` carries the signed drive demand (`linear.x` = throttle − regen)
++ steering (`angular.z`); the uDV currently has **no throttle ROS
+subscriber** (only steering). Add the inverter torque/accel path (e.g. the
+`0x507` accel frame) and map `linear.x < 0` to regen torque — the
+controller relies on it for the corner-radius speed cap and the
+finish-gate stop, so a throttle-only sink cannot slow the car. Hydraulic
+proportional braking is out of scope; only emergency EBS is wired
+(`/force_ebs`).
 
 ### G3 — Steering scaling + units `[SAFETY]`
 `/ctrl/cmd.angular.z` is normalised [-1,1]; the uDV scales it to degrees,
