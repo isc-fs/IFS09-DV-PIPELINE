@@ -360,11 +360,14 @@ TEST(NHC, StationaryAfterCalibrationDoesNotDriftVy) {
 
 TEST(NHC, NotAppliedWhenSlipFlagRaised) {
   // When the kinematic-bicycle disagrees with the gyro by more than
-  // the threshold, slip_flag goes true and NHC must NOT fire — real
-  // lateral motion (tire sideslip) is allowed to develop. Use the
-  // same setup as SteeringCorrection.FlagsSlipUnderHighResidual but
-  // then artificially inject a non-zero ay so vy WOULD pull away from
-  // zero. Without NHC, vy follows ay·dt; if NHC fired it would clamp.
+  // the threshold, slip_flag goes true and NHC must loosen (post-#555
+  // it still fires every tick, but with sigma_vy_nhc_slip = 0.5 m/s
+  // instead of 0.10 m/s) so real lateral motion (tire sideslip) is
+  // allowed to develop. Use the same setup as
+  // SteeringCorrection.FlagsSlipUnderHighResidual but then artificially
+  // inject a non-zero ay so vy WOULD pull away from zero. With the
+  // loose NHC, vy must still track ay·dt closely; a tight NHC would
+  // clamp it to ~0 within a few ticks.
   auto f = make_stationary_filter();
   f.push_steering(0.0, 0.4);  // δ ≠ 0
   for (int i = 0; i < 200; ++i) {

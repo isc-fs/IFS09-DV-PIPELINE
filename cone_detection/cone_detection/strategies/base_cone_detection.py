@@ -63,6 +63,7 @@ class BaseConeDetection(ConeDetectionStrategy):
         *,
         stage_timings: dict[str, float] | None = None,
         ransac_iter_subsample_max: int = 5000,
+        viz_full_cloud: bool = False,
     ) -> DetectionResult:
         """Run RANSAC + DBSCAN + template-dispatch fit; no ROS types."""
         compare_logger = None
@@ -73,6 +74,7 @@ class BaseConeDetection(ConeDetectionStrategy):
 
         debug_counters: dict[str, int] = {}
         cones: list[ConeObservation] = []
+        st = stage_timings if stage_timings is not None else {}
         # Degenerate clusters can still throw; swallow and log so one bad scan
         # does not take down the node.
         try:
@@ -80,8 +82,9 @@ class BaseConeDetection(ConeDetectionStrategy):
                 point_cloud,
                 debug_counters=debug_counters,
                 compare_logger=compare_logger,
-                stage_timings=stage_timings,
+                stage_timings=st,
                 ransac_iter_subsample_max=ransac_iter_subsample_max,
+                viz_full_cloud=viz_full_cloud,
             )
             cones = [
                 ConeObservation(
@@ -95,4 +98,10 @@ class BaseConeDetection(ConeDetectionStrategy):
         except Exception:
             self._log.error(traceback.format_exc())
 
-        return DetectionResult(cones=cones, debug_counters=debug_counters)
+        return DetectionResult(
+            cones=cones,
+            debug_counters=debug_counters,
+            rotated_xyz=self._detector.last_rotated_xyz,
+            outlier_xyz=self._detector.last_outlier_xyz,
+            stage_timings=st,
+        )

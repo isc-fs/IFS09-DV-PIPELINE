@@ -2,30 +2,40 @@
 """GT-as-SLAM diagnostic node.
 
 For one-shot experiments to isolate "is SLAM the bottleneck?".
-Replaces `cone_graph_slam` in the running pipeline:
+Replaces `slam_node` in the running pipeline:
 
   - Subscribes:
       /testing_only/odom        (sim ground truth, ENU)
       /Conos_raw                (per-scan cone observations, base_link)
+      /odom                     (odometry_filter_node's EKF dead-reckoning,
+                                 odom → base_link — needed to compute the
+                                 map → odom correction exactly like slam_node)
 
-  - Publishes (matches cone_graph_slam's contract):
-      /cone_slam/state          (Odometry, pose from GT-aligned)
-      /tf                       (odom → base_link, GT-aligned)
-      /tf_static                (map → odom identity, once)
-      /Conos                    (MarkerArray, /Conos_raw projected into
-                                 odom frame via GT pose, no landmark
-                                 identity; just current-scan cones at
-                                 world positions)
+  - Publishes (matches slam_node's post-#382 contract):
+      /slam/pose                (Odometry, GT-aligned pose in `map`,
+                                 body-frame twist in `base_link`)
+      /tf                       (map → odom, dynamic: gt_pose ⊖ latest /odom.
+                                 odom → base_link is owned by
+                                 odometry_filter_node and NOT published here —
+                                 two writers on one TF edge is last-writer-wins.)
+      /Conos                    (MarkerArray in `map`, /Conos_raw projected
+                                 through the GT pose; no landmark identity,
+                                 just current-scan cones at world positions)
 
 Anchor: the first GT message received becomes the calibration-end anchor.
 Subsequent GT poses are expressed in `gt_init.inverse() * gt_now`, which
-matches the SLAM-anchored odom frame the rest of the pipeline expects.
+matches the SLAM-anchored `map` frame the rest of the pipeline expects.
+Until the first /odom sample arrives, map → odom is broadcast as the GT
+pose itself (same fallback slam_node uses during the EKF calibration
+window) so the TF tree stays rooted.
 
-Usage inside the container:
+Usage inside the container (slam_node must not be running — the lifecycle
+manager will otherwise bring it back up; deactivate it or run this against a
+bag replay):
     docker compose exec -T dv_pipeline_stack bash -lc \\
       'source /opt/ros/humble/setup.bash && \\
        source /dv_pipeline_stack_ws/install/setup.bash && \\
-       pkill -f cone_graph_slam ; \\
+       ros2 lifecycle set /slam_node deactivate ; \\
        python3 /dv_pipeline_stack_ws/src/cone_slam/scripts/gt_pose_relay.py'
 
 This is a diagnostic-only node. NEVER deploy this to the real car.
@@ -48,8 +58,15 @@ from rclpy.qos import (
 
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
-from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
+from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
+
+# Same SE(2) map→odom math slam_node uses (pure-Python, no rclpy import).
+from cone_slam.tf_math import compute_map_to_odom
+
+MAP_FRAME = "map"
+ODOM_FRAME = "odom"
+BASE_FRAME = "base_link"
 
 
 def _quat_to_yaw(qw: float, qx: float, qy: float, qz: float) -> float:
@@ -66,14 +83,17 @@ def _yaw_to_quat(yaw: float) -> tuple[float, float, float, float]:
 
 class GTPoseRelay(Node):
     def __init__(self) -> None:
-        super().__init__("cone_graph_slam")  # take SLAM's name so consumers don't care
+        super().__init__("slam_node")  # take SLAM's name so consumers don't care
 
         # Anchor: first /testing_only/odom received.
         self._gt_init_x: Optional[float] = None
         self._gt_init_y: Optional[float] = None
         self._gt_init_yaw: Optional[float] = None
 
-        # Latest aligned pose (in SLAM-anchored odom frame).
+        # Latest EKF /odom sample (odom → base_link) for the map→odom math.
+        self._latest_odom: Optional[Odometry] = None
+
+        # Latest aligned pose (in SLAM-anchored map frame).
         self._aligned_x: float = 0.0
         self._aligned_y: float = 0.0
         self._aligned_yaw: float = 0.0
@@ -101,13 +121,12 @@ class GTPoseRelay(Node):
         # smoothing than this.
         self._VEL_EMA_ALPHA = 0.6
 
-        # Publishers (same names + QoS as cone_graph_slam).
+        # Publishers (same names + QoS as slam_node).
         self._tf_broadcaster = TransformBroadcaster(self)
-        self._static_tf_broadcaster = StaticTransformBroadcaster(self)
-        self._state_pub = self.create_publisher(Odometry, "/cone_slam/state", 10)
+        self._state_pub = self.create_publisher(Odometry, "/slam/pose", 10)
         self._cones_pub = self.create_publisher(MarkerArray, "/Conos", 10)
 
-        # GT subscription (BEST_EFFORT, matches cone_graph_slam).
+        # GT subscription (BEST_EFFORT, matches slam_node).
         gt_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -117,25 +136,26 @@ class GTPoseRelay(Node):
         self.create_subscription(
             Odometry, "/testing_only/odom", self._on_gt, gt_qos)
 
-        # Cone observations — reliable (same QoS as cone_graph_slam node).
+        # EKF /odom (RELIABLE, matches slam_node's subscription).
+        odom_qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=QoSDurabilityPolicy.VOLATILE,
+        )
+        self.create_subscription(Odometry, "/odom", self._on_odom, odom_qos)
+
+        # Cone observations — reliable (same QoS as slam_node).
         self.create_subscription(
             MarkerArray, "/Conos_raw", self._on_cones, 10)
-
-        # map → odom identity once.
-        self._publish_static_map_to_odom()
 
         self.get_logger().info(
             "gt_pose_relay started — DIAGNOSTIC MODE, GT pose as SLAM output")
 
-    # ------------------------------------------------------------------ TF static
+    # ------------------------------------------------------------------ /odom
 
-    def _publish_static_map_to_odom(self) -> None:
-        t = TransformStamped()
-        t.header.stamp = self.get_clock().now().to_msg()
-        t.header.frame_id = "map"
-        t.child_frame_id = "odom"
-        t.transform.rotation.w = 1.0
-        self._static_tf_broadcaster.sendTransform(t)
+    def _on_odom(self, msg: Odometry) -> None:
+        self._latest_odom = msg
 
     # ------------------------------------------------------------------ GT
 
@@ -167,9 +187,9 @@ class GTPoseRelay(Node):
         while self._aligned_yaw < -math.pi:
             self._aligned_yaw += 2.0 * math.pi
 
-        # Body-frame velocity by finite-differencing aligned pose.
-        # GT odom's twist is identically zero (bridge doesn't fill it),
-        # so we cannot trust msg.twist.twist.linear.* — see __init__.
+        # Body-frame velocity by finite-differencing aligned pose. The
+        # bridge fills /testing_only/odom twist since #315, so this is a
+        # self-contained fallback / sanity check — see __init__.
         stamp_ns = msg.header.stamp.sec * 1_000_000_000 \
             + msg.header.stamp.nanosec
         if (self._prev_aligned_x is not None
@@ -202,8 +222,8 @@ class GTPoseRelay(Node):
     def _publish_state(self, stamp) -> None:
         msg = Odometry()
         msg.header.stamp = stamp
-        msg.header.frame_id = "odom"
-        msg.child_frame_id = "base_link"
+        msg.header.frame_id = MAP_FRAME
+        msg.child_frame_id = BASE_FRAME
         msg.pose.pose.position.x = self._aligned_x
         msg.pose.pose.position.y = self._aligned_y
         msg.pose.pose.position.z = 0.0
@@ -218,14 +238,29 @@ class GTPoseRelay(Node):
         self._state_pub.publish(msg)
 
     def _publish_tf(self, stamp) -> None:
+        """Broadcast map → odom so that map → odom → base_link resolves to
+        the GT-aligned pose at the leaf, exactly like slam_node's
+        _publish_map_to_odom. odom → base_link comes from
+        odometry_filter_node; we never write that edge."""
+        if self._latest_odom is None:
+            # No EKF sample yet (its 3 s calibration window): treat odom as
+            # coincident with map so the chain still resolves to our pose.
+            dx, dy, dyaw = self._aligned_x, self._aligned_y, self._aligned_yaw
+        else:
+            sup = self._latest_odom.pose.pose
+            sup_yaw = 2.0 * math.atan2(sup.orientation.z, sup.orientation.w)
+            dx, dy, dyaw = compute_map_to_odom(
+                self._aligned_x, self._aligned_y, self._aligned_yaw,
+                sup.position.x, sup.position.y, sup_yaw,
+            )
         t = TransformStamped()
         t.header.stamp = stamp
-        t.header.frame_id = "odom"
-        t.child_frame_id = "base_link"
-        t.transform.translation.x = self._aligned_x
-        t.transform.translation.y = self._aligned_y
+        t.header.frame_id = MAP_FRAME
+        t.child_frame_id = ODOM_FRAME
+        t.transform.translation.x = float(dx)
+        t.transform.translation.y = float(dy)
         t.transform.translation.z = 0.0
-        qw, qx, qy, qz = _yaw_to_quat(self._aligned_yaw)
+        qw, qx, qy, qz = _yaw_to_quat(float(dyaw))
         t.transform.rotation.w = qw
         t.transform.rotation.x = qx
         t.transform.rotation.y = qy
@@ -240,7 +275,7 @@ class GTPoseRelay(Node):
         out = MarkerArray()
         # Clear previous frame's cones in visualizers.
         clear = Marker()
-        clear.header.frame_id = "odom"
+        clear.header.frame_id = MAP_FRAME
         clear.action = Marker.DELETEALL
         out.markers.append(clear)
 
@@ -255,7 +290,7 @@ class GTPoseRelay(Node):
             wy = self._aligned_y + s * bx + c * by
             mk = Marker()
             mk.header.stamp = m.header.stamp
-            mk.header.frame_id = "odom"
+            mk.header.frame_id = MAP_FRAME
             mk.id = i
             mk.type = Marker.CYLINDER
             mk.action = Marker.ADD

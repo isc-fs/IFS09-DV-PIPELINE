@@ -48,6 +48,78 @@ from cone_detection.rotations import vectors2matrix
 
 ConeFitBackend = Literal["template_dispatch", "two_param"]
 
+# Cap for the /lidar_points/ground viz cloud. Full cropped scans are still
+# tens of thousands of returns; Foxglove chokes before the multiply does.
+VIZ_GROUND_CLOUD_MAX_POINTS = 15_000
+
+
+def ground_rotation_matrix(plane_coefs: np.ndarray) -> np.ndarray:
+    """3×3 rotation that maps the RANSAC plane normal onto +z.
+
+    ``plane_coefs`` is ``[bias, n_x, n_y, n_z]`` from ``ransac2`` /
+    ``clustering_separation_rt``. Degenerate normals return identity.
+    """
+    k = np.zeros(3, dtype=np.float64)
+    k[-1] = 1.0
+    normal = np.asarray(plane_coefs[1:], dtype=np.float64)
+    nrm = float(np.linalg.norm(normal))
+    if nrm < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    return vectors2matrix(k, normal / nrm)
+
+
+def plane_floor_z(plane_coefs: np.ndarray) -> float:
+    """Signed height of the LiDAR origin above the RANSAC plane."""
+    normal = np.asarray(plane_coefs[1:], dtype=np.float64)
+    nrm = float(np.linalg.norm(normal))
+    if nrm < 1e-12:
+        return 0.0
+    return float(
+        np.dot(np.array([0.0, 0.0, -1.0 * float(plane_coefs[0])]), normal) / nrm
+    )
+
+
+def shift_rotated_ground_z0(
+    xyz: np.ndarray,
+    plane_coefs: np.ndarray,
+) -> np.ndarray:
+    """Shift an already-rotated cloud so the fitted floor sits at z=0."""
+    if xyz is None or len(xyz) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    out = np.ascontiguousarray(np.asarray(xyz, dtype=np.float32)[:, :3], dtype=np.float32)
+    out[:, 2] -= np.float32(plane_floor_z(plane_coefs))
+    return out
+
+
+def rotate_xyz_to_ground(
+    xyz: np.ndarray,
+    plane_coefs: np.ndarray,
+    *,
+    max_points: int = VIZ_GROUND_CLOUD_MAX_POINTS,
+    align_ground_z0: bool = True,
+) -> np.ndarray:
+    """Rotate a cloud into the same frame as ``/Conos_raw`` (ground ≈ z=0).
+
+    Detection rotates only above-ground outliers for DBSCAN. This helper
+    rotates a (possibly decimated) copy of the full cropped scan with the
+    same matrix, then optionally shifts z so the fitted floor sits at 0 —
+    matching the markers, which are published at ``z=0`` in ``base_link``.
+    """
+    if xyz is None or len(xyz) == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    pts = np.asarray(xyz, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] < 3:
+        return np.zeros((0, 3), dtype=np.float32)
+    if max_points > 0 and len(pts) > max_points:
+        stride = int(math.ceil(len(pts) / max_points))
+        pts = pts[::stride]
+    normal = np.asarray(plane_coefs[1:], dtype=np.float64)
+    nrm = float(np.linalg.norm(normal))
+    out = pts[:, :3] @ ground_rotation_matrix(plane_coefs)
+    if align_ground_z0 and nrm >= 1e-12:
+        out[:, 2] -= plane_floor_z(plane_coefs)
+    return np.ascontiguousarray(out, dtype=np.float32)
+
 
 @dataclass
 class ConeDetectionConfig:
@@ -98,6 +170,26 @@ class ConeDetectionConfig:
     # DBSCAN on rotated above-ground cloud
     dbscan_eps: float = 0.3
     dbscan_min_samples: int = 2
+
+    # DBSCAN memory/time guard. sklearn's DBSCAN materialises EVERY point's
+    # full neighbour list (radius_neighbors), so its cost is
+    # O(N × neighbours-within-eps), i.e. quadratic in point density. A scan
+    # whose above-ground cloud is both large and dense — tire walls, car
+    # off-track facing terrain / an object at close range, or a mis-fitted
+    # ground plane that turns the ground itself into "outliers" — blows
+    # straight through the container: measured 90k pts @ 20k pts/m² → 4.7 GB
+    # peak, 11 s, ~2.6 GB never returned to the OS. Two such scans OOM-kill
+    # the node (8 GB limit) after stalling SLAM for seconds. A cone scene is
+    # nowhere near: ~100 cones × ≤200 pts ≈ 20k worst case, typically 1-2k.
+    #
+    # Above dbscan_max_points the cloud is voxel-deduplicated, starting at
+    # dbscan_guard_voxel_m and doubling the cell up to dbscan_guard_voxel_max_m
+    # until the count fits, then uniformly subsampled to the cap as a last
+    # resort. Normal scans never trigger it. Set dbscan_max_points to 0 to
+    # disable.
+    dbscan_max_points: int = 20_000
+    dbscan_guard_voxel_m: float = 0.02
+    dbscan_guard_voxel_max_m: float = 0.10
 
     # Tall-column veto (tire walls, fences, people): before DBSCAN, drop EVERY
     # point whose xy grid cell (3x3-dilated) contains a return more than
@@ -217,6 +309,55 @@ def _tall_column_veto_mask(
     return ~np.isin(keys, veto_keys)
 
 
+# Voxel keys for the DBSCAN guard: per-axis index offset into [0, 2^21) and
+# packed into 63 bits. Injective for |index| < 2^20, i.e. any coordinate
+# within ±20 km at the 0.02 m default cell — far beyond LiDAR range.
+_GUARD_KEY_OFFSET = 1 << 20
+_GUARD_KEY_BITS = 21
+
+
+def _voxel_first_points(data: np.ndarray, voxel_m: float) -> np.ndarray:
+    """Keep the first point of every ``voxel_m`` cell (row order preserved)."""
+    ijk = np.floor(data[:, :3] / voxel_m).astype(np.int64) + _GUARD_KEY_OFFSET
+    keys = (
+        (ijk[:, 0] << (2 * _GUARD_KEY_BITS))
+        | (ijk[:, 1] << _GUARD_KEY_BITS)
+        | ijk[:, 2]
+    )
+    _, first = np.unique(keys, return_index=True)
+    return data[np.sort(first)]
+
+
+def _bound_dbscan_input(
+    data: np.ndarray, cfg: ConeDetectionConfig
+) -> np.ndarray:
+    """Cap the density and count of the cloud handed to DBSCAN.
+
+    No-op (returns ``data`` itself) while ``len(data) <= dbscan_max_points``
+    or the guard is disabled. See ``ConeDetectionConfig.dbscan_max_points``
+    for the rationale. Row order is preserved so downstream label handling
+    is unaffected.
+    """
+    cap = int(cfg.dbscan_max_points)
+    if cap <= 0 or len(data) <= cap:
+        return data
+    voxel = float(cfg.dbscan_guard_voxel_m)
+    while (
+        voxel > 0.0
+        and voxel <= cfg.dbscan_guard_voxel_max_m + 1e-9
+        and len(data) > cap
+    ):
+        data = _voxel_first_points(data, voxel)
+        voxel *= 2.0
+    if len(data) > cap:
+        # Seeded per scan size so a given input is reproducible; the choice
+        # itself is uniform, so each cone keeps a proportional share.
+        rng = np.random.default_rng(len(data))
+        keep = rng.choice(len(data), cap, replace=False)
+        data = data[np.sort(keep)]
+    return data
+
+
 def clustering_separation_rt(
     data: np.ndarray,
     config: ConeDetectionConfig | None = None,
@@ -258,23 +399,20 @@ def clustering_separation_rt(
     )
     if stage_timings is not None:
         stage_timings["ransac_ms"] = (time.perf_counter() - t_ransac) * 1000.0
-    k = np.zeros(data.shape[1])
-    k[-1] = 1
     outliers = np.ones(data.shape[0], dtype=bool)
     outliers[inliers] = False
     t_rotate = time.perf_counter()
     # Select outliers BEFORE rotating: row selection commutes with the
     # right-multiplied rotation, and rotating only the ~1% above-ground
     # points instead of the full cloud removes the dominant cost here.
-    data = data[outliers] @ vectors2matrix(
-        k, def_coefs[1:] / np.linalg.norm(def_coefs[1:])
-    )
+    data = data[outliers] @ ground_rotation_matrix(def_coefs)
     if stage_timings is not None:
         stage_timings["rotate_ms"] = (time.perf_counter() - t_rotate) * 1000.0
         stage_timings["n_outliers"] = float(len(data))
     if len(data) == 0:
         if stage_timings is not None:
             stage_timings["dbscan_ms"] = 0.0
+            stage_timings["n_dbscan_guard_dropped"] = 0.0
         return np.array([]), data, def_coefs
     if cfg.tall_column_veto:
         t_veto = time.perf_counter()
@@ -296,7 +434,13 @@ def clustering_separation_rt(
         if len(data) == 0:
             if stage_timings is not None:
                 stage_timings["dbscan_ms"] = 0.0
+                stage_timings["n_dbscan_guard_dropped"] = 0.0
             return np.array([]), data, def_coefs
+    # Memory guard — see ConeDetectionConfig.dbscan_max_points.
+    n_before_guard = len(data)
+    data = _bound_dbscan_input(data, cfg)
+    if stage_timings is not None:
+        stage_timings["n_dbscan_guard_dropped"] = float(n_before_guard - len(data))
     clust_model = clustering_class(
         eps=cfg.dbscan_eps, min_samples=cfg.dbscan_min_samples
     )
@@ -310,7 +454,7 @@ def clustering_separation_rt(
 class RealtimeConeDetector:
     """Configurable single-scan cone detector (see :class:`ConeDetectionConfig`)."""
 
-    __slots__ = ("config", "_prev_plane")
+    __slots__ = ("config", "_prev_plane", "last_rotated_xyz", "last_outlier_xyz")
 
     def __init__(self, config: ConeDetectionConfig | None = None) -> None:
         self.config = config or ConeDetectionConfig()
@@ -318,6 +462,12 @@ class RealtimeConeDetector:
         # the plane barely moves frame to frame, so the warm candidate
         # usually wins immediately and collapses the iteration budget.
         self._prev_plane: np.ndarray | None = None
+        # Last scan's cropped cloud after the same RANSAC rotation used
+        # for clustering, ground shifted to z=0. Only filled when
+        # ``viz_full_cloud=True`` (the /lidar_points/ground path).
+        self.last_rotated_xyz: np.ndarray = np.zeros((0, 3), dtype=np.float32)
+        # RANSAC outliers after rotation + z-shift — what DBSCAN sees.
+        self.last_outlier_xyz: np.ndarray = np.zeros((0, 3), dtype=np.float32)
 
     def detect(
         self,
@@ -328,9 +478,13 @@ class RealtimeConeDetector:
         clustering_class: type = DBSCAN,
         stage_timings: dict[str, float] | None = None,
         ransac_iter_subsample_max: int = 5000,
+        viz_full_cloud: bool = False,
     ) -> list[tuple[float, float, float, float]]:
         """Detect cones in a single LiDAR scan (same contract as ``final_cone_result_rt``)."""
         cfg = self.config
+        empty = np.zeros((0, 3), dtype=np.float32)
+        self.last_rotated_xyz = empty
+        self.last_outlier_xyz = empty
         if len(data) == 0:
             return []
         # Range pre-crop: drop far points before the O(n) RANSAC + DBSCAN
@@ -344,15 +498,29 @@ class RealtimeConeDetector:
                 return []
         if debug_counters is not None:
             debug_counters["n_input_points"] = len(data)
+        # Always collect stage bookkeeping so the DBSCAN guard can be
+        # surfaced through debug_counters even when the caller does not ask
+        # for timings (a handful of perf_counter calls — negligible).
+        st = stage_timings if stage_timings is not None else {}
         labels, clean_data, def_coefs = clustering_separation_rt(
             data,
             cfg,
             clustering_class=clustering_class,
-            stage_timings=stage_timings,
+            stage_timings=st,
             ransac_iter_subsample_max=ransac_iter_subsample_max,
             initial_plane=self._prev_plane,
         )
+        if debug_counters is not None:
+            dropped = int(st.get("n_dbscan_guard_dropped", 0))
+            debug_counters["dbscan_guard_dropped"] = dropped
+            debug_counters["dbscan_guard_scans"] = int(dropped > 0)
         self._prev_plane = def_coefs
+        # Outliers are already rotated inside clustering_separation_rt.
+        # Only the z-shift is extra; the full-crop rotate is deferred
+        # until a viz subscriber actually wants /lidar_points/ground.
+        self.last_outlier_xyz = shift_rotated_ground_z0(clean_data, def_coefs)
+        if viz_full_cloud:
+            self.last_rotated_xyz = rotate_xyz_to_ground(data, def_coefs)
         if len(labels) == 0:
             return []
         t_cluster_prep = time.perf_counter()
