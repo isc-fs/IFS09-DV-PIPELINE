@@ -506,6 +506,9 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # map→base keeps moving on the EKF instead of freezing. See
         # _ekf_holdover_result. Reset on activate/cleanup.
         self._last_correction: Optional[tuple] = None
+        # Last map→odom TF stamp (ns). tf2 rejects child-frame inserts
+        # whose stamp is ≤ the latest already in the buffer (TF_OLD_DATA).
+        self._last_map_odom_tf_ns: int = 0
 
         # Publisher / broadcaster handles (created in on_configure)
         self._tf_broadcaster = None
@@ -564,6 +567,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._latest_supervisor_odom = None
         self._prev_scan_odom_pose = None
         self._last_correction = None
+        self._last_map_odom_tf_ns = 0
         self._obs_diag = {}
         self._obs_n_scans = 0
         self._obs_last_log_ns = 0
@@ -989,6 +993,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._latest_supervisor_odom = None
         self._prev_scan_odom_pose = None
         self._last_correction = None
+        self._last_map_odom_tf_ns = 0
 
         # Components
         self._preint = None
@@ -1230,20 +1235,19 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._graph.reset_prof()
         self._prof_marks = {"entry": self._on_cones_t0}
 
-        # MarkerArray has no top-level header, but every Cone_Detection
-        # marker carries the originating LiDAR scan's header.stamp.
+        # MarkerArray has no top-level header. Prefer an ADD marker's
+        # stamp; fall back to the DELETEALL leader so a cone-empty scan
+        # still carries the originating LiDAR time (see _stamp_msg).
         stamp = self._stamp_msg(msg)
         if stamp is None:
-            # No cones this scan, but the EKF is still moving. Publish the
-            # EKF-dead-reckoned pose (held map→odom correction recomposed
-            # with the current supervisor odom) so map→base keeps
-            # advancing and downstream pose lookups (path planning) don't
-            # freeze on the last cone-corrected scan. Also republish the
-            # held cone map so the planner keeps ticking against the fresh
-            # pose. No-op until we have a correction + EKF sample.
+            # Completely empty array (no DELETEALL either). Keep map→base
+            # moving on the held correction × live EKF odom. Prefer not
+            # to stamp this with /odom's current time — that jumps ahead
+            # of the next LiDAR stamp and tf2 then drops the cone-
+            # corrected map→odom as TF_OLD_DATA.
             holdover = self._ekf_holdover_result()
             if holdover is not None:
-                hstamp = self._latest_supervisor_odom.header.stamp
+                hstamp = self.get_clock().now().to_msg()
                 self._publish_map_to_odom(hstamp, holdover)
                 self._publish_state(hstamp, holdover)
                 self._publish_cone_map(hstamp)
@@ -1803,17 +1807,23 @@ class ConeGraphSlamNode(BaseLifecycleNode):
 
     @staticmethod
     def _stamp_msg(msg: MarkerArray):
-        """Return the first non-DELETE marker's header.stamp, or None
-        if the array is empty / DELETEALL only.
+        """Return this scan's LiDAR stamp, or None if the array is empty.
 
-        MarkerArray has no top-level header, but Cone_Detection sets
-        every marker's stamp from the originating LiDAR scan, so any
-        of them is fine.
+        MarkerArray has no top-level header. Cone_Detection stamps every
+        marker (ADD and the DELETEALL leader) from the originating LiDAR
+        scan. Prefer an ADD marker; if the scan saw no cones, the
+        DELETEALL leader still carries the capture time so we can run a
+        motion-only graph step instead of stamping map→odom from /odom
+        (which is ~now and then makes the next LiDAR-stamped TF look
+        like TF_OLD_DATA).
         """
+        fallback = None
         for m in msg.markers:
             if m.action != Marker.DELETEALL:
                 return m.header.stamp
-        return None
+            if fallback is None:
+                fallback = m.header.stamp
+        return fallback
 
     @staticmethod
     def _observations_from_markers(msg: MarkerArray) -> list[Observation]:
@@ -1993,7 +2003,16 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._last_correction = (float(dx), float(dy), float(dyaw))
 
         t = TransformStamped()
-        t.header.stamp = stamp
+        # tf2 rejects a child-frame insert whose stamp is ≤ the latest
+        # already buffered (TF_OLD_DATA). LiDAR stamps can arrive out of
+        # order vs a previous holdover/now() publish; bump by 1 ns so the
+        # cone correction still lands. /slam/pose keeps the scan stamp.
+        stamp_ns = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        if stamp_ns <= self._last_map_odom_tf_ns:
+            stamp_ns = self._last_map_odom_tf_ns + 1
+        self._last_map_odom_tf_ns = stamp_ns
+        t.header.stamp.sec = stamp_ns // 1_000_000_000
+        t.header.stamp.nanosec = stamp_ns % 1_000_000_000
         t.header.frame_id = self.map_frame
         t.child_frame_id = self.odom_frame
         t.transform.translation.x = float(dx)
