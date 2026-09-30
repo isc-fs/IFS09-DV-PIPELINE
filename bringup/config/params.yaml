@@ -107,3 +107,34 @@ pipeline_watchdog_node:
     pose_progress_min_speed_mps: 1.0
     pose_progress_min_travel_m: 0.5
     pose_progress_window_s: 1.5
+
+# cone_detection/cone_detection/config.py: one parameter per ConeDetectionConfig field
+# (what each does is commented there)
+cone_detection_node:
+  ros__parameters:
+    residual_gate_mse: 0.2
+    cluster_height_min_m: 0.02
+    cluster_height_max_m: 0.55
+    range_gate_max_m: 20.0
+    input_range_crop_m: 25.0
+    ambiguous_margin_ratio: 1.5
+    big_orange_d_threshold_m: 0.45
+    floor_margin_m: 0.04
+    min_cluster_points: 3
+    ransac_prob: 0.9999
+    ransac_threshold: 0.05
+    dbscan_eps: 0.3
+    dbscan_min_samples: 2
+    dbscan_max_points: 20000
+    dbscan_guard_voxel_m: 0.02
+    dbscan_guard_voxel_max_m: 0.1
+    tall_column_veto: true
+    tall_column_veto_height_m: 0.75
+    tall_column_veto_cell_m: 0.3
+    cone_fit_solver: gn
+    template_fit_maxiter: 12
+    use_collinear_fit: true
+    template_fit_early_exit: true
+    template_early_exit_height_small_m: 0.4
+    template_early_exit_height_big_m: 0.5
+    fit_backend: template_dispatch

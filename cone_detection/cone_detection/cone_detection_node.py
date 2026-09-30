@@ -41,6 +41,7 @@ Lifecycle layout (driven by mode_manager → change_state):
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 import rclpy
@@ -67,6 +68,13 @@ if TYPE_CHECKING:
         ConeObservation,
         DetectionResult,
     )
+
+
+def _param_default(f: dataclasses.Field):
+    """A ``ConeDetectionConfig`` field's default as the ROS parameter's value, typed by the field
+    (``x: float = 1`` is a double parameter, so a params file may give it 1.5)."""
+    kind = {"float": float, "int": int, "bool": bool}.get(str(f.type), str)
+    return kind(f.default)
 
 
 def _cone_detection_strategy_map() -> dict[str, type]:
@@ -165,6 +173,13 @@ class ConeDetectionNode(BaseLifecycleNode):
 
     def __init__(self) -> None:
         super().__init__(self.NODE_NAME)
+        # One ROS parameter per ConeDetectionConfig field (same name, type and default), so the
+        # perception settings are set like every other node's: bringup/config/params.yaml, or a
+        # later --params-file. cone_detection.config imports nothing heavy (see its docstring).
+        from cone_detection.config import ConeDetectionConfig
+
+        for f in dataclasses.fields(ConeDetectionConfig):
+            self.declare_parameter(f.name, _param_default(f))
         # All I/O is created in on_configure / on_activate. Keep __init__
         # side-effect-free so a freshly constructed but unconfigured node
         # holds no resources.
@@ -188,6 +203,21 @@ class ConeDetectionNode(BaseLifecycleNode):
         self._pub_n_right = None
         self._sub = None
         self._reset_diag()
+
+    def _config_from_params(self, base):
+        """The strategy's own config (or the defaults) with every parameter that differs from
+        its field default applied on top. Returns ``(config, {name: value} applied)``.
+
+        A strategy that tunes a field for its mission keeps it unless a parameter changes it."""
+        from cone_detection.config import ConeDetectionConfig
+
+        defaults = ConeDetectionConfig()
+        changed = {}
+        for f in dataclasses.fields(ConeDetectionConfig):
+            value = self.get_parameter(f.name).value
+            if value != getattr(defaults, f.name):
+                changed[f.name] = value
+        return dataclasses.replace(base or defaults, **changed), changed
 
     # ------------------------------------------------------------------
     # Lifecycle transitions
@@ -236,7 +266,15 @@ class ConeDetectionNode(BaseLifecycleNode):
             # strategy.configure() during on_configure (not on_activate) so an
             # inactive→active toggle is instant.
             strategy_cls = strategy_map[self._behavior]
-            self._cone_strategy = strategy_cls(self.get_logger())
+            config, changed = self._config_from_params(
+                getattr(strategy_cls, "CONE_DETECTION_CONFIG", None)
+            )
+            if changed:
+                self.get_logger().info(
+                    "perception settings from parameters: "
+                    + ", ".join(f"{k}={v!r}" for k, v in sorted(changed.items()))
+                )
+            self._cone_strategy = strategy_cls(self.get_logger(), config=config)
             self._cone_strategy.configure()
             self.get_logger().info(
                 f"Cone detection pipeline ready | mode: {self._mode_name} | "
