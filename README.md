@@ -29,6 +29,7 @@ The nodes' parameters and their default values are in one file, [`bringup/config
 
 - The same defaults are also in each node's `declare_parameter()` calls (ROS needs every parameter declared, and a node started without the file falls back to them). `bringup/test/test_params_file.py` fails in CI if the two disagree, and says which value is where, so **change a default in both places**.
 - To run with other values without editing the file, pass another params file after it (later files win): `--ros-args --params-file my_overrides.yaml`. Benchmarks apply their overrides this way.
+- **Perception** (`cone_detection_node`): one parameter per field of `ConeDetectionConfig` (`cone_detection/cone_detection/config.py`, where each is explained), with the same name and default. A value that differs from the default is applied on top of the perception strategy's own settings, and the node logs which ones it applied.
 - A few parameters are deliberately not in the file: `mission_control_node`'s `free_run` and `hard_stop_on_finish` are set by launch arguments (`hard_stop_on_finish` is safety-critical, see [docs/HARD_STOP.md](docs/HARD_STOP.md)), and `slam_node.debug_gt_cones` comes from `DV_SLAM_GT_CONES`.
 
 ---

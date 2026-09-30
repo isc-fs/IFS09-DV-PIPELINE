@@ -42,6 +42,10 @@ SOURCES = {
     "mission_control_node": "mission_control/mission_control/mission_control_node.py",
     "pipeline_watchdog_node": "pipeline_watchdog/pipeline_watchdog/pipeline_watchdog_node.py",
 }
+# nodes that declare one parameter per field of a dataclass: node -> (file, class)
+DATACLASS_SOURCES = {
+    "cone_detection_node": ("cone_detection/cone_detection/config.py", "ConeDetectionConfig"),
+}
 # C++ headers holding the named constants some C++ defaults refer to
 CPP_HEADERS = ["odometry_filter/include/odometry_filter/odometry_filter.hpp"]
 # kept out of params.yaml on purpose (see the module docstring)
@@ -81,8 +85,32 @@ def _value(expr: str, consts: dict, cpp_type: str | None, depth: int = 0):
     return list(v) if isinstance(v, tuple) else v
 
 
+_FIELD = re.compile(r"^    ([a-z_][a-z0-9_]*): *([\w\[\], |]+?) *= *(.+?)\s*(?:#.*)?$", re.M)
+
+
+def _dataclass_defaults(rel: str, cls: str) -> tuple[dict, list[str]]:
+    """``name: type = default`` fields of ``cls`` (the node declares a parameter per field, typed
+    by the field: a ``float`` field is a double parameter even with an int default)."""
+    text = _read(rel)
+    body = text.split(f"class {cls}", 1)[1]
+    body = body.split("\n\n\n", 1)[0]  # up to the next top-level definition
+    out, unreadable = {}, []
+    for name, typ, expr in _FIELD.findall(body):
+        try:
+            v = _value(expr, {}, None)
+        except (ValueError, SyntaxError):
+            unreadable.append(name)
+            continue
+        if typ.strip() == "float" and isinstance(v, int) and not isinstance(v, bool):
+            v = float(v)
+        out[name] = v
+    return out, unreadable
+
+
 def declared(node: str) -> tuple[dict, list[str]]:
     """``({"dotted.name": default}, [names whose default isn't a fixed value])`` for one node."""
+    if node in DATACLASS_SOURCES:
+        return _dataclass_defaults(*DATACLASS_SOURCES[node])
     rel = SOURCES[node]
     text = _read(rel)
     if rel.endswith(".py"):
@@ -124,16 +152,17 @@ def test_params_file_is_a_ros_params_file():
 
 
 def test_every_node_with_parameters_is_covered():
-    for node, rel in SOURCES.items():
+    for node, rel in {**SOURCES, **{n: f for n, (f, _) in DATACLASS_SOURCES.items()}}.items():
         assert os.path.isfile(os.path.join(REPO, rel)), f"{node}: {rel} moved? update SOURCES"
-    tunable = {n for n in SOURCES if set(declared(n)[0]) - _excluded(n)}
+    nodes = [*SOURCES, *DATACLASS_SOURCES]
+    tunable = {n for n in nodes if set(declared(n)[0]) - _excluded(n)}
     assert set(_load()) == tunable, "params.yaml nodes differ from the nodes with tunable parameters"
 
 
 def test_params_file_matches_the_declared_defaults():
     data = _load()
     problems = []
-    for node in SOURCES:
+    for node in [*SOURCES, *DATACLASS_SOURCES]:
         code, unreadable = declared(node)
         skip = _excluded(node)
         unexpected = set(unreadable) - skip
