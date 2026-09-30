@@ -45,6 +45,15 @@ class ConeDetectionConfig:
     # Set to 0 to disable.
     input_range_crop_m: float = 25.0
 
+    # Drop returns closer than this 3D range (m) before anything else. The
+    # Hesai ATX driver keeps every firing slot in the cloud and encodes "no
+    # return" as (0, 0, 0): ~14% of a real scan (24.6k of 174k) sat at the
+    # sensor origin. After the ground shift those land ~1 m above the floor,
+    # where the tall-column veto silently discarded them, and they still cost
+    # RANSAC time. 0.1 m is far inside the sensor's blind zone, so no real
+    # return is lost. Set to 0 to disable.
+    input_min_range_m: float = 0.1
+
     # Confidence margin (residual_other / residual_min) for template_dispatch
     # ambiguity. Ignored when ``res_other`` is not finite (e.g. two_param path).
     ambiguous_margin_ratio: float = 1.5

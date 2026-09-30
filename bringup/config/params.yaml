@@ -117,6 +117,7 @@ cone_detection_node:
     cluster_height_max_m: 0.55
     range_gate_max_m: 20.0
     input_range_crop_m: 25.0
+    input_min_range_m: 0.1
     ambiguous_margin_ratio: 1.5
     big_orange_d_threshold_m: 0.45
     floor_margin_m: 0.04
