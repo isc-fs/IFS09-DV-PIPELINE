@@ -122,16 +122,22 @@ cone_detection_node:
     big_orange_d_threshold_m: 0.45
     floor_margin_m: 0.04
     min_cluster_points: 3
+    ground_method: ransac
     ransac_prob: 0.9999
     ransac_threshold: 0.05
     dbscan_eps: 0.3
     dbscan_min_samples: 2
+    cluster_backend: pypi
     dbscan_max_points: 20000
     dbscan_guard_voxel_m: 0.02
     dbscan_guard_voxel_max_m: 0.1
     tall_column_veto: true
     tall_column_veto_height_m: 0.75
     tall_column_veto_cell_m: 0.3
+    flat_cell_filter: false
+    flat_cell_size_m: 0.3
+    flat_cell_range_m: 0.08
+    flat_cell_min_points: 6
     cone_fit_solver: gn
     template_fit_maxiter: 12
     use_collinear_fit: true
