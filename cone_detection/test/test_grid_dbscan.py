@@ -54,8 +54,9 @@ def test_pypi_backend_matches_sklearn_when_installed():
     _same_partition(got, DBSCAN(eps=0.3, min_samples=2).fit_predict(pts))
 
 
-def test_pypi_backend_falls_back_to_grid_when_missing(monkeypatch, caplog):
+def test_pypi_backend_falls_back_to_grid_when_missing(monkeypatch):
     import builtins
+    import logging
 
     import cone_detection.clustering as cl
 
@@ -69,12 +70,21 @@ def test_pypi_backend_falls_back_to_grid_when_missing(monkeypatch, caplog):
     monkeypatch.setattr(builtins, "__import__", no_dbscan)
     monkeypatch.setattr(cl, "_pypi_dbscan", None)
     monkeypatch.setattr(cl, "_warned", set())
-    pts = _scene(1)
-    with caplog.at_level("WARNING"):
+    # Listen on the module logger itself: caplog hangs off the root logger, and once
+    # another package in the suite (launch) reconfigures logging the record never
+    # propagates there.
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    cl._log.addHandler(handler)
+    try:
+        pts = _scene(1)
         got = cl.fast_dbscan(pts, 0.3, 2, "pypi")
         cl.fast_dbscan(pts, 0.3, 2, "pypi")
+    finally:
+        cl._log.removeHandler(handler)
     _same_partition(got, DBSCAN(eps=0.3, min_samples=2).fit_predict(pts))
-    assert sum("falling back" in r.message for r in caplog.records) == 1  # warned once
+    assert sum("falling back" in r.getMessage() for r in records) == 1  # warned once
 
 
 def test_unsupported_min_samples_defers_to_sklearn():
