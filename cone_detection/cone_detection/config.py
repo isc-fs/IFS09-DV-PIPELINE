@@ -68,6 +68,11 @@ class ConeDetectionConfig:
     # Minimum number of returns in a DBSCAN cluster before floor culling.
     min_cluster_points: int = 3
 
+    # Ground-removal method (see ground_methods.py): ransac | ransac_zones | ransac_rings | gpf | grid_resid |
+    # ray_slope | czm. ransac is the production default; the others are being
+    # benchmarked. ransac_threshold below is the ground distance for all of them.
+    ground_method: str = "ransac"
+
     # RANSAC plane inliers
     ransac_prob: float = 0.9999
     ransac_threshold: float = 0.05
@@ -75,6 +80,15 @@ class ConeDetectionConfig:
     # DBSCAN on rotated above-ground cloud
     dbscan_eps: float = 0.3
     dbscan_min_samples: int = 2
+
+    # Clustering implementation: "sklearn" = sklearn DBSCAN; "grid" = clustering.grid_dbscan,
+    # an exact equivalent for dbscan_min_samples == 2 (any other value falls back to
+    # sklearn) that skips sklearn's per-point neighbour lists; "pypi" = the PyPI `dbscan`
+    # package (parallel C++, not guaranteed identical on points at ~eps), which falls back
+    # to grid/sklearn if it is not installed (install it with `pip install --no-deps dbscan`:
+    # it declares numpy>=2, the runtime is pinned to numpy 1.x). pypi uses PARLAY_NUM_THREADS
+    # threads (default 1).
+    cluster_backend: str = "pypi"
 
     # DBSCAN memory/time guard. sklearn's DBSCAN materialises EVERY point's
     # full neighbour list (radius_neighbors), so its cost is
@@ -108,6 +122,18 @@ class ConeDetectionConfig:
     tall_column_veto: bool = True
     tall_column_veto_height_m: float = 0.75
     tall_column_veto_cell_m: float = 0.30
+
+    # Flat-surface filter (sidewalks, uneven road): before DBSCAN, drop every point
+    # in an xy cell (flat_cell_size_m) that holds at least flat_cell_min_points
+    # returns whose heights span less than flat_cell_range_m. A cone is a spike
+    # (>= ~0.15 m of height in its footprint whenever a few laser rows hit it); a
+    # sidewalk or a bump in the road is a flat sheet. Ground removal leaves those
+    # sheets behind (they are not on the fitted plane) and they dominate the
+    # DBSCAN input. Off by default until validated on the car.
+    flat_cell_filter: bool = False
+    flat_cell_size_m: float = 0.30
+    flat_cell_range_m: float = 0.08
+    flat_cell_min_points: int = 6
 
     # Template (a, b) solver: "gn" = in-process Numba Gauss-Newton/LM
     # (production default); any scipy.optimize.minimize method name
