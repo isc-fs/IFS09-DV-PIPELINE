@@ -15,8 +15,8 @@ Why templates instead of free 4-parameter VARPRO:
   along the line of sight (zero perpendicular spread). A 4-parameter cone
   fit has a flat valley along that direction and either lands in the
   mirror-image basin (``c<0``) or returns the unmoved warm-start.
-* The two FSAE cone classes are well separated empirically (``c≈5.0, d≈0.35``
-  vs ``c≈5.5, d≈0.55``) and the rulebook guarantees only those two classes
+* The two FSAE cone classes are well separated empirically (``c≈5.16, d≈0.43``
+  vs ``c≈6.45, d≈0.65``) and the rulebook guarantees only those two classes
   are on track, so freely fitting ``(c, d)`` adds noise without information.
 * Type comes for free from the residual comparison — no separate downstream
   classifier needed.
@@ -226,27 +226,29 @@ def cone_pos_geometric(data, lidar_xy=(0.0, 0.0)):
 
 
 # Known FSAE cone classes: (apparent slope c, apex height d). These are the
-# *empirical* values measured by ``debug_tools/extract_cone_truth_params.py``
-# on the rosbag (agreement-gated VARPRO + cone_fit_2params extraction):
-#   small cones   : c ≈ 5.0, d ≈ 0.35 m
-#   big orange    : c ≈ 5.5, d ≈ 0.55 m
-# These are *not* the geometric c = d/R derived from the cone's physical base
-# radius. The vertical-beam LiDAR only ever sees the upper portion of the cone
-# (one or two rings near the apex), so the fitted slope of z vs. radial
-# distance is steeper than the physical cone slope. Using the apparent slope
-# is what makes the template fit converge to the right (a, b).
-_CONE_SMALL_C = 5.0
-_CONE_SMALL_D = 0.35
-_CONE_BIG_C = 5.5
-_CONE_BIG_D = 0.55
+# *empirical* values measured from free 4-parameter VARPRO fits of simulator
+# clusters, with z measured above the RANSAC ground plane (IFSSIM
+# tools/sim_benchmark/diagnose_cone_shape.py;
+# median over 612 small-cone fits on a 1.74 M pts/s bag and 1858 big-cone fits
+# on a 95 s bag that faces the start gate; fit RMSE ~7 mm):
+#   small cones   : c ≈ 5.16, d ≈ 0.43 m
+#   big orange    : c ≈ 6.45, d ≈ 0.65 m
+# d is where the fitted sides meet, not the cone's height: the sim cones have
+# flat tops (highest returns ~0.30 m / ~0.48 m), and z = d - c * r only
+# describes the sides. The previous 5.0 / 0.35 and 5.5 / 0.55 sat 8-10 cm
+# low, masked while z was measured from the sensor instead of the ground.
+_CONE_SMALL_C = 5.16
+_CONE_SMALL_D = 0.43
+_CONE_BIG_C = 6.45
+_CONE_BIG_D = 0.65
 
 # Tolerance for matching the estimated slope to one of the known cone classes.
 # Sources of noise on the slope estimate: LiDAR z noise (~1 cm) divided by the
 # cluster's along-ray span (typically 5–15 cm), giving σ_c ~ 0.1–0.3. With the
-# new empirical c values 5.0 and 5.5 only 0.5 apart, a tight tolerance would
-# misclassify borderline cones; we allow 0.5 so the classifier degenerates to
-# "nearest of the two" inside [4.5, 6.0] and only blatantly off slopes
-# (e.g. ground residuals, walls) fall through to the geometric fallback.
+# c values 5.16 and 6.45 about 1.3 apart, 0.5 keeps the two acceptance bands
+# [4.66, 5.66] and [5.95, 6.95] disjoint while still absorbing slope noise;
+# blatantly off slopes (e.g. ground residuals, walls) fall through to the
+# geometric fallback.
 _CONE_CLASS_TOLERANCE = 0.5
 
 # Minimum cluster size for the type-aware collinear fit. The (t, z) regression

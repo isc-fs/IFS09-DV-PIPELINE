@@ -55,6 +55,10 @@ jobs:
           # cone_slam imports gtsam at module scope, so the SLAM tests cannot
           # even be collected without it. Pin matches the runtime image.
           python3 -m pip install --no-cache-dir "gtsam==4.3a0"
+          # cone_detection's default cluster backend. --no-deps: it declares
+          # numpy>=2, and numpy is pinned <2 above. Optional at runtime (falls
+          # back to the in-tree grid DBSCAN), installed so its test runs.
+          python3 -m pip install --no-cache-dir --no-deps dbscan
 
       - name: Install the FaSTTUBe planner
         # path_planning's tests importorskip('fsd_path_planning'). Under the

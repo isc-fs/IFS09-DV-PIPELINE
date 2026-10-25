@@ -8,6 +8,7 @@ from cone_detection.cone_detection import (
     ground_rotation_matrix,
     rotate_xyz_to_ground,
 )
+from cone_detection.cone_fit import _CONE_SMALL_C, _CONE_SMALL_D
 
 
 def test_tilted_plane_lands_at_z0():
@@ -87,3 +88,60 @@ def test_ground_rotation_matrix_is_orthonormal():
     assert R.shape == (3, 3)
     assert np.allclose(R @ R.T, np.eye(3), atol=1e-9)
     assert abs(np.linalg.det(R) - 1.0) < 1e-6
+
+
+def test_elevated_sensor_cone_fit_uses_height_above_ground():
+    # Car-mounted LiDAR: sensor ~1.07 m above flat ground, so ground returns
+    # sit at z = -1.07 in the sensor frame. The cone templates fix the apex
+    # at d ABOVE GROUND; if z were left relative to the sensor the
+    # fit would chase an apex ~1 m above the cone and misplace (a, b).
+    rng = np.random.default_rng(7)
+    sensor_h = 1.07
+    n = 6000
+    gx = rng.uniform(0.5, 15.0, n)
+    gy = rng.uniform(-5.0, 5.0, n)
+    ground = np.column_stack([gx, gy, rng.normal(-sensor_h, 0.005, n)])
+
+    # Near face of a small cone (template shape, z = d - c r above ground), as a
+    # LiDAR sees it: an arc of the surface facing the sensor.
+    cx, cy, c_small, d_small = 7.0, 1.5, _CONE_SMALL_C, _CONE_SMALL_D
+    m = 60
+    h = rng.uniform(0.06, 0.30, m)
+    r = (d_small - h) / c_small
+    ux, uy = np.array([cx, cy]) / np.hypot(cx, cy)
+    psi = rng.uniform(-1.0, 1.0, m)
+    px = cx - r * (np.cos(psi) * ux - np.sin(psi) * uy)
+    py = cy - r * (np.cos(psi) * uy + np.sin(psi) * ux)
+    cone = np.column_stack([px, py, h - sensor_h])
+
+    scan = np.vstack([ground, cone]).astype(np.float32)
+    det = RealtimeConeDetector(ConeDetectionConfig())
+    cones = det.detect(scan)
+
+    # Outliers handed to clustering are expressed as height above ground.
+    assert float(det.last_outlier_xyz[:, 2].min()) > 0.0
+    assert len(cones) == 1
+    ax, ay = cones[0][0], cones[0][1]
+    assert np.hypot(ax - cx, ay - cy) < 0.05
+
+
+def test_no_return_points_at_origin_are_dropped_on_input():
+    # The Hesai driver encodes "no return" as (0, 0, 0). With the sensor 1 m
+    # up, those points would sit ~1 m above the fitted ground after the shift
+    # and get swallowed by the tall-column veto; they must never get that far.
+    rng = np.random.default_rng(11)
+    sensor_h = 1.07
+    n = 4000
+    ground = np.column_stack(
+        [rng.uniform(0.5, 12.0, n), rng.uniform(-4.0, 4.0, n), rng.normal(-sensor_h, 0.005, n)]
+    )
+    no_return = np.zeros((5000, 3))
+    scan = np.vstack([ground, no_return]).astype(np.float32)
+
+    det = RealtimeConeDetector(ConeDetectionConfig())
+    counters: dict = {}
+    timings: dict = {}
+    det.detect(scan, debug_counters=counters, stage_timings=timings)
+
+    assert counters["n_input_points"] == n
+    assert timings.get("n_vetoed", 0.0) == 0.0
