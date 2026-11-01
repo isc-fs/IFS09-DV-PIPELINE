@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  cyclonedds.xml — Cyclone DDS settings for the DVPC (issue #21, docs/DDS_TUNING.md).
+
+  Installed to /etc/dv/cyclonedds.xml by install_cyclonedds_tuning.sh and loaded through
+  CYCLONEDDS_URI (set in /etc/dv/cyclonedds.env).
+
+  Asks for a 10 MB socket receive buffer so a whole 4.5 MB lidar cloud fits while the
+  receiver catches up. "max", not "min": with "min" Cyclone refuses to start any node when
+  the kernel limit (net.core.rmem_max) is lower, which would take the whole stack down. With
+  "max" it falls back to the largest size the kernel allows.
+-->
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain id="any">
+    <Internal>
+      <SocketReceiveBufferSize max="10MB"/>
+    </Internal>
+  </Domain>
+</CycloneDDS>

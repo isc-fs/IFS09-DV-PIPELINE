@@ -135,3 +135,9 @@ is behaviour-neutral for `dv race`.
 Files: `deploy/dv` (verbs), `deploy/dv-manual.service` + `deploy/dv_manual.sh`
 (manual path), `deploy/dv-record.service` + `deploy/dv_record.sh` (shared core),
 `bringup/launch/car_sensors.launch.py` (sensor layer).
+
+## Missing lidar clouds
+
+If a bag is missing `/lidar_points` messages while `/lidar_packets_loss` shows no UDP loss,
+the clouds were lost in ROS 2 delivery, not in the driver. See
+[DDS_TUNING.md](DDS_TUNING.md) (issue #21) for the cause, the fix and how to measure it.

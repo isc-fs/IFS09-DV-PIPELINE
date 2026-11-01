@@ -23,6 +23,9 @@ Wants=microros-agent.service
 
 [Service]
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Cyclone DDS large-message tuning (issue #21, docs/DDS_TUNING.md). The leading '-'
+# makes the file optional: absent = Cyclone defaults, exactly as before.
+EnvironmentFile=-/etc/dv/cyclonedds.env
 User=isc
 ExecStart=/usr/local/bin/dv_automission.sh
 Restart=always

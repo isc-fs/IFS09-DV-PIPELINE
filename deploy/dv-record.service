@@ -18,6 +18,9 @@ PartOf=dv-pipeline.service
 [Service]
 User=isc
 Environment=HOME=/home/isc
+# Cyclone DDS large-message tuning (issue #21, docs/DDS_TUNING.md). The leading '-'
+# makes the file optional: absent = Cyclone defaults, exactly as before.
+EnvironmentFile=-/etc/dv/cyclonedds.env
 ExecStart=/usr/local/bin/dv_record.sh
 # SIGINT (not SIGTERM) so ros2 bag record finalizes the bag metadata.
 KillSignal=SIGINT
