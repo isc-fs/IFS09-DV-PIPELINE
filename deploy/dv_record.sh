@@ -73,6 +73,8 @@ source /opt/ros/humble/setup.bash 2>/dev/null
 source /home/isc/ros2_ws/install/local_setup.bash 2>/dev/null
 source /home/isc/dv_ws/install/local_setup.bash 2>/dev/null
 export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Cyclone DDS large-message tuning (issue #21, docs/DDS_TUNING.md); no file = defaults.
+if [ -f /etc/dv/cyclonedds.env ]; then set -a; . /etc/dv/cyclonedds.env; set +a; fi
 
 OUTDIR="${DV_RECORD_DIR:-/home/isc/bags}"
 EXCLUDE="${DV_RECORD_EXCLUDE-}"                       # default: exclude NOTHING

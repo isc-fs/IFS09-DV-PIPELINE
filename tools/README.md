@@ -14,6 +14,11 @@ Automated orchestration script that replays a rosbag, runs the pipeline, and rec
 
 **Use when:** You want to capture the complete pipeline behavior for performance analysis
 
+### dds_large_msg_check.py
+Publishes lidar-sized (4.5 MB) best-effort messages at 10 Hz from one process and counts how many a second process receives. Measures ROS 2 delivery loss on the current machine without driving.
+
+**Use when:** Checking the Cyclone DDS tuning before and after installing it (see [docs/DDS_TUNING.md](../docs/DDS_TUNING.md)). Stop the pipeline first.
+
 ## Quick Start
 
 ```bash

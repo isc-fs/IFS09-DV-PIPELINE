@@ -15,6 +15,9 @@ Requires=microros-agent.service
 
 [Service]
 Environment=RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Cyclone DDS large-message tuning (issue #21, docs/DDS_TUNING.md). The leading '-'
+# makes the file optional: absent = Cyclone defaults, exactly as before.
+EnvironmentFile=-/etc/dv/cyclonedds.env
 # Persistent Numba JIT cache (mirrors NUMBA_CACHE_DIR in the sim's
 # docker-compose). Without it numba's cache=True writes next to each
 # module's source and FAILS SILENTLY where that isn't writable —
