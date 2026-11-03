@@ -1,0 +1,57 @@
+name: Sim check
+
+# Drives this PR's pipeline in the simulator: starts isc-fs/IFSSIM's sim check
+# (.github/workflows/sim-pr.yml) on the team's GPU box with this PR's head
+# commit in place of the pinned pipeline. The acceleration mission runs 3
+# times, and the result comes back on this PR as the `sim check` status, with
+# a link to the run and its logs.
+#
+# The box is a machine on a private network and this repo is public, so it
+# only runs for branches of this repo (never forks), and only after a
+# maintainer adds the `sim-test` label. New pushes to a labelled PR run it
+# again; remove the label to stop that.
+#
+# Needs the SIM_CHECK_TOKEN secret: a fine-grained token with Actions: write on
+# isc-fs/IFSSIM (to start the run) and Commit statuses: write on this repo (so
+# the run can post its result here).
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+    branches: [dev]
+
+permissions:
+  statuses: write
+
+jobs:
+  start:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'sim-test') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'sim-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Start the sim check on the GPU box
+        env:
+          TOKEN: ${{ secrets.SIM_CHECK_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::The SIM_CHECK_TOKEN secret isn't set, so the sim check can't be started."
+            exit 1
+          fi
+          GH_TOKEN="$TOKEN" gh workflow run sim-pr.yml -R isc-fs/IFSSIM --ref dev \
+            -f pipeline_sha="$SHA" -f pipeline_pr="$PR"
+          gh api "repos/$GITHUB_REPOSITORY/statuses/$SHA" \
+            -f state=pending -f context="sim check" \
+            -f description="queued for the GPU box" \
+            -f target_url="https://github.com/isc-fs/IFSSIM/actions/workflows/sim-pr.yml" >/dev/null
+          {
+            echo "### Sim check started"
+            echo
+            echo "Runs in [isc-fs/IFSSIM](https://github.com/isc-fs/IFSSIM/actions/workflows/sim-pr.yml)"
+            echo "as \"Sim check: pipeline PR #$PR\". The result shows on this PR as the \`sim check\` status."
+          } >> "$GITHUB_STEP_SUMMARY"
