@@ -17,6 +17,7 @@ any change_state services. Real wiring lands in step 5.
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable
 
@@ -104,6 +105,14 @@ _CHANGE_STATE_TIMEOUT_S: float = 120.0
 # the cone_detection pipeline before BaseLifecycleNode registers ~/setup;
 # on cold Docker/WSL imports alone often exceed 5 s.
 _SETUP_TIMEOUT_S: float = 60.0
+
+# How long to wait for one Setup reply before asking again. The handler only
+# stores mode + behavior, so a node answers in milliseconds; a reply that
+# hasn't come by then was lost (the server can answer before it has
+# discovered a brand-new client's reply reader, and DDS drops it, #25).
+# Asking again on the same client gets through. Total wait is still capped
+# by _SETUP_TIMEOUT_S.
+_SETUP_REPLY_TIMEOUT_S: float = 5.0
 
 # Sentinel transition ID for the setup step on /mode_manager/progress.
 TRANSITION_SETUP: int = 255
@@ -557,15 +566,26 @@ class ModeManagerNode(LifecycleNode):
         req = Setup.Request()
         req.mode_name = mode_name
         req.behavior = behavior
-        future = cli.call_async(req)
-        if not self._wait_for_future(future, _SETUP_TIMEOUT_S):
+        deadline = time.monotonic() + _SETUP_TIMEOUT_S
+        tries = 0
+        while True:
+            tries += 1
+            future = cli.call_async(req)
+            wait = min(_SETUP_REPLY_TIMEOUT_S, max(0.0, deadline - time.monotonic()))
+            if self._wait_for_future(future, wait):
+                break
             try:
                 cli.remove_pending_request(future)
             except Exception:
                 pass
-            err = "timeout waiting for setup response"
-            self._publish_progress(node_name, TRANSITION_SETUP, "timeout", err)
-            return False, err
+            if time.monotonic() >= deadline:
+                err = f"timeout waiting for setup response ({tries} tries)"
+                self._publish_progress(node_name, TRANSITION_SETUP, "timeout", err)
+                return False, err
+            self.get_logger().warning(
+                f"  [{node_name}] no setup reply after "
+                f"{_SETUP_REPLY_TIMEOUT_S:g}s, asking again"
+            )
 
         result = future.result()
         if result is None:
