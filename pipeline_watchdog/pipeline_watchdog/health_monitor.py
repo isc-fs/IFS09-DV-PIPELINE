@@ -90,7 +90,10 @@ class PoseProgressSpec:
                      Sized well under what the speed floor implies so noise
                      and a slow solve can't false-trip.
     window_s:        how long the "moving but not progressing" condition must
-                     hold continuously before tripping.
+                     hold continuously before tripping: counted from the
+                     later of the pose's last advance and /odom first
+                     reaching min_speed_mps, so a car that drives off after
+                     a long wait gets the full window too (#31).
     enabled:         escape hatch — liveness alone still works with this off.
     """
 
@@ -151,6 +154,9 @@ class HealthMonitor:
         self._tripped: bool = False
         self._reasons: tuple[str, ...] = ()
         self._speed_mps: float = 0.0
+        # When /odom last went from below min_speed_mps to at or above it;
+        # None while below. The stall can't have started before this.
+        self._moving_since: float | None = None
         self._pose = _PoseProgressState()
 
     # -- introspection -------------------------------------------------
@@ -186,6 +192,7 @@ class HealthMonitor:
             self._last_seen.clear()
             self._pose = _PoseProgressState()
             self._speed_mps = 0.0
+            self._moving_since = None
 
     def record(self, topic: str, now: float) -> None:
         """Note that `topic` produced a message at `now`."""
@@ -198,6 +205,10 @@ class HealthMonitor:
         to catch SLAM lying, so the speed reference must not come from SLAM.
         """
         self._speed_mps = abs(float(speed_mps))
+        if self._speed_mps < self._pose_cfg.min_speed_mps:
+            self._moving_since = None
+        elif self._moving_since is None:
+            self._moving_since = now
 
     def record_pose(self, x: float, y: float, now: float) -> None:
         """Feed one /slam/pose sample into the progress check.
@@ -268,9 +279,11 @@ class HealthMonitor:
         cfg = self._pose_cfg
         if not cfg.enabled or not self._pose.valid:
             return None
-        if self._speed_mps < cfg.min_speed_mps:
+        if self._speed_mps < cfg.min_speed_mps or self._moving_since is None:
             return None
-        stalled_for = now - self._pose.anchor_t
+        # A pose that stood still while the car stood still isn't stale: only
+        # count the time the car has been moving (#31).
+        stalled_for = now - max(self._pose.anchor_t, self._moving_since)
         if stalled_for <= cfg.window_s:
             return None
         return (

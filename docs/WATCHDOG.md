@@ -88,6 +88,9 @@ as fatal as "SLAM stopped".
    where SLAM republishes a stale solve. Liveness alone would miss it.
    The speed reference deliberately comes from `/odom`, **not** SLAM: the whole
    point is to catch SLAM lying, so the audit cannot use SLAM as its source.
+   The stall is timed from the later of the pose's last advance and `/odom`
+   reaching the speed floor, so a car that stood still (waiting for its first
+   path, say) and then drives off gets the full window before it can trip (#31).
 
 Both latch. Once tripped, a run never un-trips; clearing requires a new run
 (leaving `DV_RUNNING`). An intermittent sensor that recovers for one scan must
