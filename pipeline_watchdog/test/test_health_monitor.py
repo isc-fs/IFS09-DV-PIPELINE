@@ -192,6 +192,67 @@ def test_advancing_pose_while_moving_is_fine():
         t += 0.1
 
 
+def test_driving_off_after_a_long_wait_is_fine():
+    """#31: the car waited ~15 s for its first path, standing still with a
+    still pose, then drove off. The stall must count from when it started
+    moving, not from the pose's last advance before the wait."""
+    mon = _pose_mon()
+    mon.set_running(True, 0.0)
+    t = 4.0
+    while t < 18.0:                    # waiting: stopped, pose still
+        mon.record("/odom", t)
+        mon.record_speed(0.0, t)
+        mon.record_pose(0.0, 0.0, t)
+        assert not mon.evaluate(t).tripped
+        t += 0.1
+    x, v = 0.0, 0.0
+    while t < 24.0:                    # drive off, accelerating at 2 m/s^2
+        v = min(3.0, v + 0.2)
+        x += v * 0.1
+        mon.record("/odom", t)
+        mon.record_speed(v, t)
+        mon.record_pose(x, 0.0, t)     # SLAM keeps up
+        assert not mon.evaluate(t).tripped, f"false trip at t={t:.1f}"
+        t += 0.1
+
+
+def test_frozen_pose_after_driving_off_still_trips():
+    """The same drive-off, but SLAM never follows: still trips, once the car
+    has been moving for the window."""
+    mon = _pose_mon()
+    mon.set_running(True, 0.0)
+    t = 4.0
+    while t < 18.0:
+        mon.record("/odom", t)
+        mon.record_speed(0.0, t)
+        mon.record_pose(0.0, 0.0, t)
+        t += 0.1
+    tripped_at = None
+    while t < 22.0 and tripped_at is None:
+        mon.record("/odom", t)
+        mon.record_speed(2.0, t)
+        mon.record_pose(0.0, 0.0, t)   # frozen
+        if mon.evaluate(t).tripped:
+            tripped_at = t
+        t += 0.1
+    assert tripped_at is not None
+    assert 18.0 + 1.5 <= tripped_at < 18.0 + 2.0
+
+
+def test_slowing_below_the_floor_restarts_the_count():
+    """Dipping under min_speed_mps resets the moving clock."""
+    mon = _pose_mon()
+    mon.set_running(True, 0.0)
+    mon.record_pose(0.0, 0.0, 4.0)
+    t = 4.0
+    for speed in [2.0] * 10 + [0.5] * 5 + [2.0] * 10:   # 1.0 s, dip, 1.0 s
+        mon.record("/odom", t)
+        mon.record_speed(speed, t)
+        mon.record_pose(0.0, 0.0, t)
+        assert not mon.evaluate(t).tripped, f"false trip at t={t:.1f}"
+        t += 0.1
+
+
 def test_slow_creep_below_min_travel_still_trips():
     """Pose drifting a few mm is not progress — must still trip."""
     mon = _pose_mon()
