@@ -51,6 +51,7 @@ from control.controllers.pure_pursuit import PurePursuit
 from control.controllers.stanley import Stanley
 from control.controllers.pi_velocity import PIVelocity
 from control.models.bicycle import KinematicBicycle
+from control.odom_history import OdomHistory, project_pose, yaw_from_quat
 
 
 class ControlNode(BaseLifecycleNode):
@@ -93,6 +94,10 @@ class ControlNode(BaseLifecycleNode):
         # cascade would corrupt velocity feeding control.
         self._latest_pose: Optional[Odometry] = None
         self._latest_odom: Optional[Odometry] = None
+        # Recent /odom poses by stamp: /slam/pose is the pose at the
+        # LiDAR scan time (~0.1 s old on arrival, then held for 0.1 s),
+        # so each tick carries it forward by the odom motion since then.
+        self._odom_hist = OdomHistory()
         self._latest_path_xs: list[float] = []
         self._latest_path_ys: list[float] = []
         # Per-pose curvature from path_planning, smuggled through
@@ -213,6 +218,7 @@ class ControlNode(BaseLifecycleNode):
         # Reset all per-run state so deactivate→activate is a fresh run.
         self._latest_pose = None
         self._latest_odom = None
+        self._odom_hist.clear()
         self._latest_path_xs = []
         self._latest_path_ys = []
         self._latest_path_kappas = []
@@ -515,8 +521,17 @@ class ControlNode(BaseLifecycleNode):
     def _on_odom(self, msg: Odometry) -> None:
         """Dead-reckoning Odometry from sim_supervisor (or uDV on the
         real car). Pose field on this message drifts over time; we
-        consume only the twist for body-frame velocity."""
+        consume only the twist for body-frame velocity, plus the
+        pose's short-term motion to carry /slam/pose forward (#33)."""
         self._latest_odom = msg
+        p = msg.pose.pose
+        st = msg.header.stamp
+        self._odom_hist.add(
+            st.sec + st.nanosec * 1e-9,
+            p.position.x,
+            p.position.y,
+            yaw_from_quat(p.orientation.w, p.orientation.z),
+        )
 
     def _on_path(self, msg: Path) -> None:
         self._latest_path_xs = [p.pose.position.x for p in msg.poses]
@@ -757,6 +772,24 @@ class ControlNode(BaseLifecycleNode):
         msg.data = (time.perf_counter() - t0) * 1000.0
         self._latency_pub.publish(msg)
 
+    def _project_to_now(self, x: float, y: float, yaw: float, stamp):
+        """Carry the scan-time SLAM pose forward to the newest /odom.
+
+        /slam/pose arrives ~0.1 s after its scan and is then held until
+        the next one, so the controller saw the car up to ~0.2 s in the
+        past, a delay the heading loop turned into a weave (#33). Falls
+        back to the pose as-is when /odom has no sample at its stamp.
+        """
+        odom_then = self._odom_hist.at(stamp.sec + stamp.nanosec * 1e-9)
+        if odom_then is None or self._latest_odom is None:
+            return x, y, yaw
+        o = self._latest_odom.pose.pose
+        odom_now = (
+            o.position.x, o.position.y,
+            yaw_from_quat(o.orientation.w, o.orientation.z),
+        )
+        return project_pose((x, y, yaw), odom_then, odom_now)
+
     def _build_state(self) -> Optional[VehicleState]:
         """Compose VehicleState from two sources:
           • pose (x, y, yaw) from /slam/pose — SLAM's drift-
@@ -775,9 +808,13 @@ class ControlNode(BaseLifecycleNode):
         t = self._latest_odom
         q = p.pose.pose.orientation
         _, _, yaw = quat2euler([q.w, q.x, q.y, q.z])
+        x, y, yaw = self._project_to_now(
+            p.pose.pose.position.x, p.pose.pose.position.y, yaw,
+            p.header.stamp,
+        )
         return VehicleState(
-            x=p.pose.pose.position.x,
-            y=p.pose.pose.position.y,
+            x=x,
+            y=y,
             yaw=yaw,
             vx=t.twist.twist.linear.x,
             vy=t.twist.twist.linear.y,

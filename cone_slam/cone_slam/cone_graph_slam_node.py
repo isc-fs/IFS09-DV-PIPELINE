@@ -56,6 +56,7 @@ from cone_slam.factor_graph import FactorGraph, ScanResult
 from cone_slam.imu_preintegrator import ImuPreintegrator, ImuSample
 from cone_slam.landmark_db import LandmarkDb
 from cone_slam.lap_counter import LapCounter, LapCounterConfig
+from cone_slam.odom_history import OdomHistory, yaw_from_quat
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from node_base.base_lifecycle_node import BaseLifecycleNode
@@ -238,6 +239,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         #          changes.
         # An invalid value falls back to "odom" with a warning.
         self.declare_parameter("motion_model", "odom")
+        # Pair each scan's cones with the /odom pose at the scan's own
+        # stamp (interpolated) rather than the newest /odom sample, which
+        # is one LiDAR delivery latency (~0.1 s) later (#33; option A in
+        # docs/lidar_imu_time_sync_mitigation.md). False restores the
+        # old newest-sample behaviour for A/B runs.
+        self.declare_parameter("odom_time_align", True)
         # Pose-jump sanity check thresholds (#273 follow-up).
         # Maximum allowed deviation between iSAM2's optimized pose and
         # the IMU-predicted pose at each scan. When a wrong cone match
@@ -496,6 +503,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # scan tick.
         self._sub_supervisor_odom = None
         self._latest_supervisor_odom: Optional[Odometry] = None
+        # Recent /odom poses by stamp, so each scan's cones are paired
+        # with the odom pose from when the LiDAR saw them, not the
+        # newest one (#33). _odom_at_counts tracks how often the lookup
+        # fell back to the newest sample (clock mismatch, gaps).
+        self._odom_hist = OdomHistory()
+        self._odom_at_counts = [0, 0]  # [at scan time, fell back]
         # /odom pose at the previous SCAN tick (not the previous /odom
         # message). Used to compute the EKF's per-scan delta-pose and
         # stage it as a BetweenFactor on X(k-1)→X(k). Reset on activate.
@@ -565,6 +578,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._gt_init_pose = None
         self._latest_track = None
         self._latest_supervisor_odom = None
+        self._odom_hist.clear()
         self._prev_scan_odom_pose = None
         self._last_correction = None
         self._last_map_odom_tf_ns = 0
@@ -614,6 +628,8 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             )
             motion_model = "odom"
         self._motion_model = motion_model
+        self._odom_time_align = bool(
+            self.get_parameter("odom_time_align").value)
         if self._motion_model == "odom":
             self.get_logger().info(
                 "motion_model=odom — EKF /odom delta is the primary "
@@ -991,6 +1007,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # is now dynamic, computed from slam_pose ⊖ /odom).
         self._tf_broadcaster = None
         self._latest_supervisor_odom = None
+        self._odom_hist.clear()
         self._prev_scan_odom_pose = None
         self._last_correction = None
         self._last_map_odom_tf_ns = 0
@@ -1277,7 +1294,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 self._publish_state(stamp, self._latest_result)
                 self._publish_cone_map(stamp)
                 return
-            cur_odom_pose = _odom_to_pose3(self._latest_supervisor_odom)
+            cur_odom_pose = self._odom_pose3_at(stamp)
             if self._prev_scan_odom_pose is None:
                 # First scan after calibration: no previous /odom sample
                 # to delta against. Record this one as the baseline and
@@ -1409,7 +1426,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             # this one and skip the factor — the IMU+RPM priors carry the
             # load that scan.
             if self._latest_supervisor_odom is not None:
-                cur_odom_pose = _odom_to_pose3(self._latest_supervisor_odom)
+                cur_odom_pose = self._odom_pose3_at(stamp)
                 if self._prev_scan_odom_pose is not None:
                     between_pose = self._prev_scan_odom_pose.inverse().compose(
                         cur_odom_pose
@@ -1900,8 +1917,52 @@ class ConeGraphSlamNode(BaseLifecycleNode):
     # ----- output ------------------------------------------------------------
 
     def _on_supervisor_odom(self, msg: Odometry) -> None:
-        """Cache sim_supervisor's latest /odom sample for map→odom math."""
+        """Cache sim_supervisor's latest /odom sample for map→odom math,
+        and keep a short history so scans can look up odom at their own
+        capture time."""
         self._latest_supervisor_odom = msg
+        p = msg.pose.pose
+        st = msg.header.stamp
+        self._odom_hist.add(
+            st.sec + st.nanosec * 1e-9,
+            p.position.x,
+            p.position.y,
+            yaw_from_quat(p.orientation.w, p.orientation.z),
+        )
+
+    def _odom_xyyaw_at(self, stamp) -> Optional[tuple[float, float, float]]:
+        """/odom (x, y, yaw) at `stamp`, interpolated from the history.
+
+        Falls back to the newest /odom sample when the stamp is outside
+        the history (e.g. LiDAR and /odom on different clocks), which is
+        what every scan used before #33. Returns None with no /odom yet.
+        """
+        if self._latest_supervisor_odom is None:
+            return None
+        pose = None
+        if self._odom_time_align:
+            pose = self._odom_hist.at(stamp.sec + stamp.nanosec * 1e-9)
+            self._odom_at_counts[pose is None] += 1
+        n = sum(self._odom_at_counts)
+        if self._odom_time_align and n % 200 == 0:
+            self.get_logger().info(
+                f"ODOM_AT_SCAN matched={self._odom_at_counts[0]} "
+                f"fallback_latest={self._odom_at_counts[1]}"
+            )
+        if pose is None:
+            p = self._latest_supervisor_odom.pose.pose
+            pose = (
+                p.position.x,
+                p.position.y,
+                yaw_from_quat(p.orientation.w, p.orientation.z),
+            )
+        return pose
+
+    def _odom_pose3_at(self, stamp) -> "gtsam.Pose3":
+        """`_odom_xyyaw_at` as a Pose3 (z from the newest sample)."""
+        x, y, yaw = self._odom_xyyaw_at(stamp)
+        z = self._latest_supervisor_odom.pose.pose.position.z
+        return gtsam.Pose3(gtsam.Rot3.Yaw(float(yaw)), gtsam.Point3(x, y, z))
 
     def _ekf_holdover_result(self) -> Optional[ScanResult]:
         """EKF-dead-reckoned pose for a scan with no cone correction.
@@ -1981,13 +2042,11 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             # downstream consumers still see slam's pose at the leaf.
             dx, dy, dyaw = slam_x, slam_y, slam_yaw
         else:
-            sup = self._latest_supervisor_odom.pose.pose
-            sup_x = sup.position.x
-            sup_y = sup.position.y
-            # Supervisor's quaternion is axis-z only (2D yaw); the
-            # full-precision recovery is 2·atan2(qz, qw). q.w can be
-            # negative but yaw stays in (-π, π] from atan2.
-            sup_yaw = 2.0 * np.arctan2(sup.orientation.z, sup.orientation.w)
+            # The SLAM pose is the pose at the scan stamp, so the odom
+            # pose it is differenced against must be from the same
+            # instant (#33); the newest /odom sample is up to ~120 ms
+            # later and made this correction jump every scan.
+            sup_x, sup_y, sup_yaw = self._odom_xyyaw_at(stamp)
             dx, dy, dyaw = compute_map_to_odom(
                 slam_x,
                 slam_y,
