@@ -3,22 +3,31 @@
 Geometric path follower that projects the front axle onto the path and
 combines two terms:
 
-    δ = ψ_e + atan(k · e_y / (k_soft + v)) - k_yaw_rate · ω_ref
+    δ = ψ_e + atan(k · e_y / (k_soft + v)) - k_yaw_rate · (ω_meas - ω_ref)
 
 where:
     ψ_e             heading error between path tangent and vehicle yaw,
                     wrapped to [-π, π]
-    e_y             signed cross-track error at the front axle (m,
-                    positive = path is to the left of the car)
+    e_y             signed perpendicular distance from the front axle
+                    to the path polyline (m, positive = path is to the
+                    left of the car)
     v               longitudinal speed (m/s)
     k               cross-track gain (1/s scaling)
     k_soft          softening term (m/s) — keeps the denominator
                     bounded at v→0, preventing the cross-track term
                     from saturating the actuator on a stopped car
-    k_yaw_rate      damping against commanded yaw rate (rad / (rad/s));
-                    0.0 disables the term
-    ω_ref           yaw rate the bicycle would produce at the current
-                    speed and previous steering — used only for damping
+    k_yaw_rate      yaw-rate damping gain (rad / (rad/s)); 0.0 disables
+    ω_meas          measured yaw rate (state.yaw_rate, from /odom)
+    ω_ref           yaw rate the path asks for at the projection point,
+                    v · κ_path
+
+The damping term is Hoffmann §3.3: it opposes the car's actual yaw
+rate in excess of what the path needs, so it damps the heading loop
+without biasing the steady-state corner command. An earlier version
+fed back the controller's own previous command instead of the
+measured yaw rate; that only scaled the gain down (by ~half at 3 m/s)
+and added a tick-to-tick sign alternation, and did nothing about the
+car's real yaw overshoot (#33).
 
 Reference: Hoffmann et al., "Autonomous Automobile Trajectory
 Tracking for Off-Road Driving" (Stanley, 2007),
@@ -49,6 +58,7 @@ When NOT to use Stanley:
 """
 from __future__ import annotations
 import math
+from dataclasses import dataclass
 
 from control.controllers.base import LateralController
 from control.state import VehicleState
@@ -96,41 +106,22 @@ class Stanley(LateralController):
         # null out.
         fx, fy = self.model.front_axle_xy(state.x, state.y, state.yaw)
 
-        target_idx, dx, dy, abs_err = _nearest_projection(fx, fy, ref.x, ref.y)
+        proj = _project_onto_polyline(fx, fy, ref.x, ref.y)
 
-        # Heading error: path tangent minus vehicle yaw, wrapped to
-        # [-π, π]. ref.yaw is populated by ReferenceTrajectory.from_xy
-        # via forward-difference of consecutive waypoints — small bias
-        # near the path tail (last yaw copies the previous one) but
-        # accurate everywhere else.
-        path_yaw = ref.yaw[target_idx] if ref.yaw else state.yaw
-        yaw_error = _wrap_pi(path_yaw - state.yaw)
-
-        # Signed cross-track error. The dot product with the
-        # front-axle "right-hand" vector (sin yaw, -cos yaw) yields
-        # positive when the path is to the RIGHT of the car (i.e.
-        # the offset vector projects onto +right), and we flip the
-        # sign so positive = path-is-LEFT, matching the math
-        # convention used by the rest of `controllers/` (positive
-        # steering = LEFT). Result: a positive crosstrack error
-        # asks the controller to steer LEFT, which is the same sign
-        # as a positive yaw_error.
-        right = (math.sin(state.yaw), -math.cos(state.yaw))
-        proj = dx * right[0] + dy * right[1]
-        crosstrack = -math.copysign(abs_err, proj)
+        # Heading error: path tangent at the projection point minus
+        # vehicle yaw, wrapped to [-π, π].
+        yaw_error = _wrap_pi(proj.yaw - state.yaw)
 
         # Cross-track term — atan keeps the contribution bounded
-        # below ±π/2 even when (k_soft + v) is small.
-        cte_term = math.atan2(self.k * crosstrack, self.k_soft + state.speed)
+        # below ±π/2 even when (k_soft + v) is small. proj.offset is
+        # positive when the path is to the LEFT of the car, which is
+        # the same sign as a positive (left) steering command.
+        cte_term = math.atan2(self.k * proj.offset, self.k_soft + state.speed)
 
-        # Yaw-rate damping (Hoffmann §3.3). ω_ref ≈ v · sin(δ_prev) / L
-        # from the kinematic bicycle. Subtracts a velocity-scaled
-        # multiple of the last commanded yaw rate from the new
-        # steering command. Disabled (0.0) by default; turn on if the
-        # car wags at high speed.
-        prev_steer_rad = self._prev_steer_norm * self.model.max_steer_rad
-        omega_ref = state.speed * math.sin(prev_steer_rad) / self.model.wheelbase
-        yaw_rate_term = self.k_yaw_rate * omega_ref
+        # Yaw-rate damping (Hoffmann §3.3) on the MEASURED yaw rate,
+        # relative to the yaw rate the path itself asks for.
+        omega_ref = state.speed * proj.curvature
+        yaw_rate_term = self.k_yaw_rate * (state.yaw_rate - omega_ref)
 
         steer_rad = yaw_error + cte_term - yaw_rate_term
 
@@ -138,6 +129,7 @@ class Stanley(LateralController):
         # k_damp_steer is dimensionless; 0.0 = off, 0.5 = blends in
         # half of the previous tick's steering as inertia. Helps on
         # noisy planner yaw.
+        prev_steer_rad = self._prev_steer_norm * self.model.max_steer_rad
         if self.k_damp_steer > 0.0:
             steer_rad -= self.k_damp_steer * (steer_rad - prev_steer_rad)
 
@@ -152,29 +144,75 @@ class Stanley(LateralController):
         return steer_norm
 
 
-def _nearest_projection(
-    x: float, y: float, xs, ys,
-) -> tuple[int, float, float, float]:
-    """Return (idx, dx, dy, dist) of the nearest path point to (x, y).
+@dataclass(frozen=True)
+class _Projection:
+    offset: float     # signed perpendicular distance, + = path is LEFT of the point
+    yaw: float        # path tangent at the projection
+    curvature: float  # path curvature at the projection (1/m, + = turns left)
 
-    Linear scan — paths are 30-ish points, no spatial index needed.
-    Matches the convention used by the alt_pipeline Stanley port: dx,
-    dy are the offsets FROM the front axle TO the path point.
+
+def _project_onto_polyline(x: float, y: float, xs, ys) -> _Projection:
+    """Project (x, y) onto the polyline through (xs, ys).
+
+    Uses the closest point on any SEGMENT, not the closest vertex: with
+    ~0.5 m waypoint spacing the vertex distance carries up to 0.25 m of
+    along-track offset, and on a centred car its sign is noise, which
+    turned the cross-track term into a ±0.1 rad sawtooth (#33).
+
+    The tangent is blended between neighbouring segment headings so it
+    doesn't step at every vertex, and the curvature is the heading
+    change per metre around the projection (pure geometry, so its sign
+    always matches the path).
     """
-    best_i = 0
-    best_d2 = float("inf")
-    best_dx = 0.0
-    best_dy = 0.0
-    for i, (px, py) in enumerate(zip(xs, ys)):
-        ddx = px - x
-        ddy = py - y
-        d2 = ddx * ddx + ddy * ddy
+    n = len(xs)
+    seg_yaw = [
+        math.atan2(ys[i + 1] - ys[i], xs[i + 1] - xs[i]) for i in range(n - 1)
+    ]
+    seg_len = [
+        math.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i]) for i in range(n - 1)
+    ]
+
+    best_i, best_t, best_d2 = 0, 0.0, float("inf")
+    for i in range(n - 1):
+        ax, ay = xs[i], ys[i]
+        dx, dy = xs[i + 1] - ax, ys[i + 1] - ay
+        l2 = dx * dx + dy * dy
+        t = 0.0 if l2 < 1e-12 else ((x - ax) * dx + (y - ay) * dy) / l2
+        t = min(1.0, max(0.0, t))
+        px, py = ax + t * dx, ay + t * dy
+        d2 = (x - px) ** 2 + (y - py) ** 2
         if d2 < best_d2:
-            best_d2 = d2
-            best_i = i
-            best_dx = ddx
-            best_dy = ddy
-    return best_i, best_dx, best_dy, math.sqrt(best_d2)
+            best_i, best_t, best_d2 = i, t, d2
+
+    i, t = best_i, best_t
+    ax, ay = xs[i], ys[i]
+    dx, dy = xs[i + 1] - ax, ys[i + 1] - ay
+    px, py = ax + t * dx, ay + t * dy
+    norm = math.hypot(dx, dy)
+    if norm < 1e-9:
+        offset = 0.0
+    else:
+        # cross(tangent, point - projection) > 0 ⇒ point is LEFT of the
+        # path ⇒ path is to its RIGHT ⇒ negative offset.
+        cross = (dx * (y - py) - dy * (x - px)) / norm
+        offset = -math.copysign(math.sqrt(best_d2), cross) if best_d2 > 0 else 0.0
+
+    # Tangent: blend toward the neighbouring segment on the near side
+    # of the projection so the heading changes smoothly across vertices.
+    yaw = seg_yaw[i]
+    if t > 0.5 and i + 1 < n - 1:
+        yaw = seg_yaw[i] + (t - 0.5) * _wrap_pi(seg_yaw[i + 1] - seg_yaw[i])
+    elif t < 0.5 and i > 0:
+        yaw = seg_yaw[i] - (0.5 - t) * _wrap_pi(seg_yaw[i] - seg_yaw[i - 1])
+    yaw = _wrap_pi(yaw)
+
+    # Curvature: heading change over the segments either side.
+    lo, hi = max(0, i - 1), min(n - 2, i + 1)
+    ds = 0.5 * seg_len[lo] + sum(seg_len[lo + 1:hi]) + 0.5 * seg_len[hi]
+    curvature = (
+        _wrap_pi(seg_yaw[hi] - seg_yaw[lo]) / ds if hi > lo and ds > 1e-6 else 0.0
+    )
+    return _Projection(offset=offset, yaw=yaw, curvature=curvature)
 
 
 def _wrap_pi(a: float) -> float:

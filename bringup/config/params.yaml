@@ -52,6 +52,7 @@ slam_node:
     odom_frame: odom
     base_frame: base_link
     motion_model: odom
+    odom_time_align: true   # pair cones with /odom at the scan stamp, not the newest sample (#33)
     pose_jump_max_pos_m: 0.8
     pose_jump_max_yaw_rad: 0.3
     new_landmark_proximity_veto_m: 1.5
