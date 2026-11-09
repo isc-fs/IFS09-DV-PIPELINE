@@ -470,6 +470,11 @@ class ControlNode(BaseLifecycleNode):
         # approach. The anchor lands 3-5 m short of the line, so stopping on
         # it leaves the car short of the finish (see stop_target.py).
         self.declare_parameter("stop_past_anchor_m", 8.0)
+        # Modes that keep the old stop: on the anchor, straight-line
+        # distance. Skidpad latches its anchor on the centre gate during the
+        # first lap (it is crossed every lap), so a target past it, measured
+        # along a fixed direction, stopped the car mid-run on the circles.
+        self.declare_parameter("stop_on_anchor_modes", ["skidpad"])
 
     def _p(self, name: str):
         return self.get_parameter(name).value
@@ -648,8 +653,13 @@ class ControlNode(BaseLifecycleNode):
         ax = o.pose.pose.position.x + cos_y * sx - sin_y * sy
         ay = o.pose.pose.position.y + sin_y * sx + cos_y * sy
         past = float(self.get_parameter("stop_past_anchor_m").value)
-        (tx, ty), self._stop_dir = stop_target(
-            (o.pose.pose.position.x, o.pose.pose.position.y), (ax, ay), past)
+        if self._mode_name in list(self.get_parameter("stop_on_anchor_modes").value or []):
+            # Old behaviour: stop on the anchor, straight-line distance.
+            past = 0.0
+            (tx, ty), self._stop_dir = (ax, ay), (0.0, 0.0)
+        else:
+            (tx, ty), self._stop_dir = stop_target(
+                (o.pose.pose.position.x, o.pose.pose.position.y), (ax, ay), past)
         self._stop_anchor_xy = (tx, ty)
         self._stop_latched = True
         self.get_logger().info(

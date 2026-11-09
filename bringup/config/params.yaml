@@ -50,6 +50,7 @@ control_node:
     steering_rate: 5.0
     stop_latch_min_travel: 30.0
     stop_past_anchor_m: 8.0  # the finish-gate anchor lands 3-5 m short of the line
+    stop_on_anchor_modes: ["skidpad"]  # anchor latches on the centre gate in lap 1: keep the old stop
 
 # cone_slam/cone_slam/cone_graph_slam_node.py
 slam_node:
