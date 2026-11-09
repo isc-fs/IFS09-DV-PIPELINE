@@ -52,6 +52,7 @@ from control.controllers.stanley import Stanley
 from control.controllers.pi_velocity import PIVelocity
 from control.models.bicycle import KinematicBicycle
 from control.odom_history import OdomHistory, project_pose, yaw_from_quat
+from control.stop_target import distance_to_stop, stop_target
 
 
 class ControlNode(BaseLifecycleNode):
@@ -110,6 +111,9 @@ class ControlNode(BaseLifecycleNode):
         # tick when the gate is first detected, then frozen as a stop anchor
         # in odom frame (see _on_orange / _stop_distance).
         self._stop_anchor_xy: Optional[tuple[float, float]] = None
+        # Direction the car was heading for the gate when it latched; the
+        # stop distance is measured along it (see stop_target.py).
+        self._stop_dir: tuple[float, float] = (0.0, 0.0)
         self._stop_latched: bool = False
         # Gate for the stop anchor — see _on_orange. Defaults TRUE so a stack
         # with no /slam/final_lap publisher behaves exactly as it did before
@@ -223,6 +227,7 @@ class ControlNode(BaseLifecycleNode):
         self._latest_path_ys = []
         self._latest_path_kappas = []
         self._stop_anchor_xy = None
+        self._stop_dir = (0.0, 0.0)
         self._stop_latched = False
         self._final_lap = True
         self._travelled = 0.0
@@ -457,6 +462,10 @@ class ControlNode(BaseLifecycleNode):
         # detection counts as the finish. Trackdrive courses are >100 m
         # per lap; 30 m is safely past any start-gate proximity.
         self.declare_parameter("stop_latch_min_travel", 30.0)
+        # Stop this far past the finish-gate anchor, measured along the
+        # approach. The anchor lands 3-5 m short of the line, so stopping on
+        # it leaves the car short of the finish (see stop_target.py).
+        self.declare_parameter("stop_past_anchor_m", 8.0)
 
     def _p(self, name: str):
         return self.get_parameter(name).value
@@ -624,20 +633,24 @@ class ControlNode(BaseLifecycleNode):
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         ax = o.pose.pose.position.x + cos_y * sx - sin_y * sy
         ay = o.pose.pose.position.y + sin_y * sx + cos_y * sy
-        self._stop_anchor_xy = (ax, ay)
+        past = float(self.get_parameter("stop_past_anchor_m").value)
+        (tx, ty), self._stop_dir = stop_target(
+            (o.pose.pose.position.x, o.pose.pose.position.y), (ax, ay), past)
+        self._stop_anchor_xy = (tx, ty)
         self._stop_latched = True
         self.get_logger().info(
             f"stop latched at odom=({ax:.2f}, {ay:.2f}) "
-            f"from {n} big-orange cones"
+            f"from {n} big-orange cones; stopping {past:.1f} m past it "
+            f"at ({tx:.2f}, {ty:.2f})"
         )
 
     def _stop_distance(self, state: VehicleState) -> float:
-        """Euclidean distance from car to the latched stop anchor. Returns
-        +inf when no stop is latched (controller treats this as 'no cap')."""
+        """Distance left to the stop target, along the approach direction;
+        <= 0 once the car is past it. Returns +inf when no stop is latched
+        (controller treats this as 'no cap')."""
         if not self._stop_latched or self._stop_anchor_xy is None:
             return float("inf")
-        ax, ay = self._stop_anchor_xy
-        return math.hypot(ax - state.x, ay - state.y)
+        return distance_to_stop((state.x, state.y), self._stop_anchor_xy, self._stop_dir)
 
     # ------------------------------------------------------------- tick
 
