@@ -362,6 +362,12 @@ class ControlNode(BaseLifecycleNode):
         # a setpoint drop. Tune up later once tire physics is known.
         self.declare_parameter("a_lat_max", 3.0)
         self.declare_parameter("a_dec_max", 4.0)
+        # Regen is the only service brake and it is power limited:
+        # a(v) = min(a_dec_max, regen_power_w / (vehicle_mass · v)). 11 kW is
+        # the IFS-08 pack's charge limit (95s6p Sony VTC6, 5 A/cell = 30 A at
+        # ~370 V). The setpoint brakes back from every corner ahead with it.
+        self.declare_parameter("regen_power_w", 11000.0)
+        self.declare_parameter("vehicle_mass", 275.0)
         # Lowered 1.5 → 1.0 to widen the band where the β·R radius cap
         # (in pure_pursuit.py) can actually bind. Previous default left
         # hairpins between R ≈ 1.4 and 2.1 m unguarded — the cap was
@@ -502,6 +508,8 @@ class ControlNode(BaseLifecycleNode):
                 ki=self._p("ki_v"),
                 deadband=self._p("deadband_v"),
                 throttle_max=self._p("throttle_max"),
+                regen_power_w=self._p("regen_power_w"),
+                vehicle_mass=self._p("vehicle_mass"),
                 v_meas_tau=self._p("v_meas_tau"),
                 v_meas_max_accel=self._p("v_meas_max_accel"),
             )

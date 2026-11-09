@@ -5,13 +5,19 @@ Two stages each tick:
 1. SETPOINT — derive a target speed from path geometry + stop state:
        v_set = min(
            v_max,                                  # global cap
-           sqrt(R · a_lat_max),                    # cornering grip limit
-           sqrt(2 · a_dec_max · d_to_stop),        # kinematic decel cap
+           min over path points i ahead of
+               brake_entry_speed(sqrt(R_i · a_lat_max), s_i),   # corners
+           brake_entry_speed(0, d_to_stop),        # stop
        )
-   R is the inverse of the maximum |κ| within the next ~3 s of path
-   travel — using the local point's κ alone is too noisy. d_to_stop comes
-   from the reference trajectory (set by the stop-detection logic in the
-   ROS node, not in this controller).
+   brake_entry_speed(v_end, s) is the fastest the car can be going now and
+   still be at v_end after braking for s metres. Regen is the car's only
+   service brake (EBS is a hard stop, never speed control), and regen is
+   POWER limited: deceleration is a(v) = min(a_dec_max, P_regen / (m·v)),
+   so it falls with speed (11 kW, 275 kg: 4 m/s² up to 10 m/s, 3.3 at
+   12 m/s). Each corner ahead is braked back to the car along the path, so
+   the setpoint starts dropping as soon as braking has to start, not when
+   the corner is already close. d_to_stop comes from the reference
+   trajectory (set by the stop-detection logic in the ROS node).
 
 2. TRACK — PI on (v_set - v):
        u = Kp · err + Ki · ∫err dt
@@ -54,6 +60,8 @@ class PIVelocity(LongitudinalController):
                  deadband: float = 0.2,
                  lookahead_curvature_s: float = 3.0,
                  throttle_max: float = 0.6,
+                 regen_power_w: float = 11000.0,
+                 vehicle_mass: float = 275.0,
                  v_meas_tau: float = 0.15,
                  v_meas_max_accel: float = 20.0):
         self.v_max = v_max
@@ -63,6 +71,12 @@ class PIVelocity(LongitudinalController):
         self.ki = ki
         self.deadband = deadband
         self.lookahead_curvature_s = lookahead_curvature_s
+        # Regen braking model: a(v) = min(a_dec_max, regen_power_w / (m·v)).
+        # regen_power_w is the pack's charge limit (IFS-08: 95s6p Sony VTC6
+        # at 5 A/cell = 30 A, ~11 kW). <= 0 disables the power limit and
+        # leaves a constant a_dec_max.
+        self.regen_power_w = regen_power_w
+        self.vehicle_mass = vehicle_mass
         # Throttle saturation. Lower than the regen cap because if SLAM's
         # velocity estimate lags reality (we observed this triggering at
         # ~6 m/s during baseline runs — pose froze, controller kept
@@ -157,21 +171,16 @@ class PIVelocity(LongitudinalController):
         # tightest corner in that window. Using the local κ alone is too
         # noisy (audit item #9); using the global max overshoots straights
         # adjacent to hairpins.
-        kappa_max = self._max_curvature_ahead(state, ref)
+        kappa_max, v_corner = self._corner_speed_ahead(state, ref)
         # Stash for diagnostic publish (#260 follow-up). Float NaN
         # would also work but Float32 publishers prefer real values.
         self.last_kappa_max = kappa_max
-        if kappa_max < 1e-3:
-            v_corner = self.v_max
-        else:
-            R = 1.0 / kappa_max
-            v_corner = math.sqrt(R * self.a_lat_max)
 
-        # Kinematic stop cap. ref.stop_distance is +inf when no stop is
-        # latched, so v_stop = +inf and this cap is non-binding. Once latched
-        # by the ROS node, v_stop pulls the setpoint smoothly to zero.
+        # Stop cap. ref.stop_distance is +inf when no stop is latched, so
+        # v_stop = +inf and this cap is non-binding. Once latched by the ROS
+        # node, v_stop pulls the setpoint down along the braking curve to 0.
         if ref.stop_distance < float("inf") and ref.stop_distance > 0.0:
-            v_stop = math.sqrt(2.0 * self.a_dec_max * ref.stop_distance)
+            v_stop = self.brake_entry_speed(0.0, ref.stop_distance)
         else:
             v_stop = float("inf")
         if ref.stop_latched and ref.stop_distance <= 0.0:
@@ -179,16 +188,66 @@ class PIVelocity(LongitudinalController):
 
         return max(0.0, min(self.v_max, v_corner, v_stop))
 
+    def brake_entry_speed(self, v_end: float, s: float) -> float:
+        """Fastest speed the car can have now and still be down to v_end
+        after s metres of regen braking, with a(v) = min(a_dec_max, P/(m·v)).
+
+        Below v* = P/(m·a_dec_max) the car brakes at a constant a_dec_max
+        (v² = v_end² + 2·a·s); above it, braking power is constant and
+        m·v²·dv = -P·ds, so v³ = v_end³ + 3·P·s/m.
+        """
+        a = self.a_dec_max
+        if s <= 0.0 or a <= 0.0:
+            return max(0.0, v_end)
+        P, m = self.regen_power_w, self.vehicle_mass
+        if P <= 0.0 or m <= 0.0:
+            return math.sqrt(v_end * v_end + 2.0 * a * s)
+        v_star = P / (m * a)
+        if v_end >= v_star:
+            return (v_end ** 3 + 3.0 * P * s / m) ** (1.0 / 3.0)
+        s_const = (v_star * v_star - v_end * v_end) / (2.0 * a)
+        if s <= s_const:
+            return math.sqrt(v_end * v_end + 2.0 * a * s)
+        return (v_star ** 3 + 3.0 * P * (s - s_const) / m) ** (1.0 / 3.0)
+
+    def _corner_speed_ahead(self, state: VehicleState, ref: ReferenceTrajectory):
+        """(max |κ| ahead, speed allowed now by the corners ahead).
+
+        Each point i ahead of the car has a grip-limited speed
+        sqrt(a_lat_max / |κ_i|); the car may go no faster now than it can
+        brake down to that over the arc length to i. The minimum over the
+        path is the corner limit. Without arc length (s) on the reference,
+        falls back to the tightest corner's speed with no braking distance.
+        """
+        if not ref.curvature:
+            return 0.0, self.v_max
+        nearest = _nearest_index(state.x, state.y, ref.x, ref.y)
+        have_s = len(ref.s) == len(ref.curvature)
+        s0 = ref.s[nearest] if have_s else 0.0
+        kmax = 0.0
+        v_allow = self.v_max
+        for i in range(nearest, len(ref.curvature)):
+            k = abs(ref.curvature[i])
+            if k > kmax:
+                kmax = k
+            if k < 1e-3:
+                continue
+            v_c = math.sqrt(self.a_lat_max / k)
+            if v_c >= v_allow:
+                continue
+            ds = (ref.s[i] - s0) if have_s else 0.0
+            v_allow = min(v_allow, self.brake_entry_speed(v_c, ds))
+        return kmax, v_allow
+
     def _max_curvature_ahead(self, state: VehicleState, ref: ReferenceTrajectory) -> float:
         """Maximum |κ| ahead of the car's nearest point, over the entire
         path.
 
-        Originally windowed by `current_speed × horizon_s`, but with the
-        path-output cap from PR #261 (12 m of arc length), the corner
-        can't physically be further than the path is long. Scanning the
-        full forward portion catches corners early — including hairpins
-        whose curvature is concentrated at one or two points along an
-        otherwise-straight approach (#260 follow-up).
+        Scanning the full forward portion catches corners early —
+        including hairpins whose curvature is concentrated at one or two
+        points along an otherwise-straight approach (#260 follow-up).
+        Kept for callers that want κ alone; the setpoint uses
+        _corner_speed_ahead.
         """
         if not ref.curvature:
             return 0.0
