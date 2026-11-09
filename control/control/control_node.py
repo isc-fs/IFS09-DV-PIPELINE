@@ -368,6 +368,11 @@ class ControlNode(BaseLifecycleNode):
         # ~370 V). The setpoint brakes back from every corner ahead with it.
         self.declare_parameter("regen_power_w", 11000.0)
         self.declare_parameter("vehicle_mass", 275.0)
+        # Sight distance: the car must be able to take a corner of this
+        # radius right past the end of the visible path (FS hairpin 4.5 m).
+        self.declare_parameter("unseen_corner_radius", 4.5)
+        # Regen ramp-up + PI lag, taken off every braking distance as v · t.
+        self.declare_parameter("brake_latency_s", 0.3)
         # Lowered 1.5 → 1.0 to widen the band where the β·R radius cap
         # (in pure_pursuit.py) can actually bind. Previous default left
         # hairpins between R ≈ 1.4 and 2.1 m unguarded — the cap was
@@ -510,6 +515,8 @@ class ControlNode(BaseLifecycleNode):
                 throttle_max=self._p("throttle_max"),
                 regen_power_w=self._p("regen_power_w"),
                 vehicle_mass=self._p("vehicle_mass"),
+                unseen_corner_radius=self._p("unseen_corner_radius"),
+                brake_latency_s=self._p("brake_latency_s"),
                 v_meas_tau=self._p("v_meas_tau"),
                 v_meas_max_accel=self._p("v_meas_max_accel"),
             )

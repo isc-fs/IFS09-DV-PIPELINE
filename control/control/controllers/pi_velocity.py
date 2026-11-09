@@ -19,6 +19,16 @@ Two stages each tick:
    the corner is already close. d_to_stop comes from the reference
    trajectory (set by the stop-detection logic in the ROS node).
 
+   Two more caps keep that honest:
+     * Sight distance — the path only reaches as far as the cones the car
+       can see (~12-15 m), and what lies past its end is unknown. The car
+       must always be able to slow to the speed of the tightest legal
+       corner (unseen_corner_radius) by the end of the path. Without this
+       the car floors it on every short straight and meets the next corner
+       too fast (sweep at 12 m/s, 11 kW: 81 cones on 3 tracks).
+     * Latency — regen ramps up over ~0.3 s (regen_rate) and the PI lags,
+       so every braking distance is shortened by v · brake_latency_s.
+
 2. TRACK — PI on (v_set - v):
        u = Kp · err + Ki · ∫err dt
    With a deadband around the setpoint to avoid bang-bang flip between
@@ -62,6 +72,8 @@ class PIVelocity(LongitudinalController):
                  throttle_max: float = 0.6,
                  regen_power_w: float = 11000.0,
                  vehicle_mass: float = 275.0,
+                 unseen_corner_radius: float = 4.5,
+                 brake_latency_s: float = 0.3,
                  v_meas_tau: float = 0.15,
                  v_meas_max_accel: float = 20.0):
         self.v_max = v_max
@@ -77,6 +89,11 @@ class PIVelocity(LongitudinalController):
         # leaves a constant a_dec_max.
         self.regen_power_w = regen_power_w
         self.vehicle_mass = vehicle_mass
+        # Past the end of the path the car must be able to take a corner of
+        # this radius (FS hairpins: 4.5 m). <= 0 disables the sight cap.
+        self.unseen_corner_radius = unseen_corner_radius
+        # Distance lost to regen ramp-up and PI lag: v · brake_latency_s.
+        self.brake_latency_s = brake_latency_s
         # Throttle saturation. Lower than the regen cap because if SLAM's
         # velocity estimate lags reality (we observed this triggering at
         # ~6 m/s during baseline runs — pose froze, controller kept
@@ -171,7 +188,9 @@ class PIVelocity(LongitudinalController):
         # tightest corner in that window. Using the local κ alone is too
         # noisy (audit item #9); using the global max overshoots straights
         # adjacent to hairpins.
-        kappa_max, v_corner = self._corner_speed_ahead(state, ref)
+        # Distance covered before braking actually bites.
+        lost = max(0.0, state.vx) * self.brake_latency_s
+        kappa_max, v_corner = self._corner_speed_ahead(state, ref, lost)
         # Stash for diagnostic publish (#260 follow-up). Float NaN
         # would also work but Float32 publishers prefer real values.
         self.last_kappa_max = kappa_max
@@ -180,7 +199,7 @@ class PIVelocity(LongitudinalController):
         # v_stop = +inf and this cap is non-binding. Once latched by the ROS
         # node, v_stop pulls the setpoint down along the braking curve to 0.
         if ref.stop_distance < float("inf") and ref.stop_distance > 0.0:
-            v_stop = self.brake_entry_speed(0.0, ref.stop_distance)
+            v_stop = self.brake_entry_speed(0.0, ref.stop_distance - lost)
         else:
             v_stop = float("inf")
         if ref.stop_latched and ref.stop_distance <= 0.0:
@@ -210,13 +229,15 @@ class PIVelocity(LongitudinalController):
             return math.sqrt(v_end * v_end + 2.0 * a * s)
         return (v_star ** 3 + 3.0 * P * (s - s_const) / m) ** (1.0 / 3.0)
 
-    def _corner_speed_ahead(self, state: VehicleState, ref: ReferenceTrajectory):
+    def _corner_speed_ahead(self, state: VehicleState, ref: ReferenceTrajectory,
+                            lost: float = 0.0):
         """(max |κ| ahead, speed allowed now by the corners ahead).
 
         Each point i ahead of the car has a grip-limited speed
         sqrt(a_lat_max / |κ_i|); the car may go no faster now than it can
-        brake down to that over the arc length to i. The minimum over the
-        path is the corner limit. Without arc length (s) on the reference,
+        brake down to that over the arc length to i, less `lost`. The end
+        of the path counts as a corner of unseen_corner_radius. The minimum
+        is the corner limit. Without arc length (s) on the reference,
         falls back to the tightest corner's speed with no braking distance.
         """
         if not ref.curvature:
@@ -226,6 +247,11 @@ class PIVelocity(LongitudinalController):
         s0 = ref.s[nearest] if have_s else 0.0
         kmax = 0.0
         v_allow = self.v_max
+        # Sight distance: be able to take the tightest legal corner right
+        # after the end of the path.
+        if have_s and self.unseen_corner_radius > 0.0:
+            v_unseen = math.sqrt(self.a_lat_max * self.unseen_corner_radius)
+            v_allow = min(v_allow, self.brake_entry_speed(v_unseen, ref.s[-1] - s0 - lost))
         for i in range(nearest, len(ref.curvature)):
             k = abs(ref.curvature[i])
             if k > kmax:
@@ -235,7 +261,7 @@ class PIVelocity(LongitudinalController):
             v_c = math.sqrt(self.a_lat_max / k)
             if v_c >= v_allow:
                 continue
-            ds = (ref.s[i] - s0) if have_s else 0.0
+            ds = (ref.s[i] - s0 - lost) if have_s else 0.0
             v_allow = min(v_allow, self.brake_entry_speed(v_c, ds))
         return kmax, v_allow
 

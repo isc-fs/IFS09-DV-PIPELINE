@@ -28,6 +28,8 @@ control_node:
     a_dec_max: 4.0
     regen_power_w: 11000.0  # pack charge limit: 95s6p VTC6 at 5 A/cell; regen is the only service brake
     vehicle_mass: 275.0
+    unseen_corner_radius: 4.5  # sight distance: slow enough for a hairpin right past the end of the path
+    brake_latency_s: 0.3
     lookahead_min: 1.0
     lookahead_k: 0.5
     stanley_k: 2.0

@@ -19,8 +19,10 @@ P, M, A = 11000.0, 275.0, 4.0          # v* = P / (m·a) = 10 m/s
 
 
 def _ctrl(**kw) -> PIVelocity:
+    # Sight cap and latency off unless a test turns them on.
     args = dict(v_max=12.0, a_lat_max=3.0, a_dec_max=A,
-                regen_power_w=P, vehicle_mass=M)
+                regen_power_w=P, vehicle_mass=M,
+                unseen_corner_radius=0.0, brake_latency_s=0.0)
     args.update(kw)
     return PIVelocity(**args)
 
@@ -104,3 +106,30 @@ def test_stop_cap_uses_braking_curve():
     # Short of v*, identical to the old sqrt(2·a·d) cap.
     ref.stop_distance = 5.0
     assert c._setpoint(VehicleState(vx=5.0), ref) == pytest.approx(math.sqrt(2 * A * 5.0))
+
+
+def _straight(length_m: float, step: float = 0.5) -> ReferenceTrajectory:
+    n = int(length_m / step) + 1
+    return ReferenceTrajectory.from_xy([i * step for i in range(n)], [0.0] * n)
+
+
+def test_sight_cap_on_a_short_straight():
+    c = _ctrl(unseen_corner_radius=4.5)
+    ref = _straight(12.0)
+    v_unseen = math.sqrt(3.0 * 4.5)
+    v_set = c._setpoint(VehicleState(vx=10.0), ref)
+    assert v_set == pytest.approx(c.brake_entry_speed(v_unseen, 12.0), rel=1e-6)
+    assert v_set < 12.0
+
+
+def test_sight_cap_lifts_on_a_long_straight():
+    c = _ctrl(unseen_corner_radius=4.5)
+    assert c._setpoint(VehicleState(vx=12.0), _straight(60.0)) == pytest.approx(12.0)
+
+
+def test_latency_shortens_braking_distance():
+    c = _ctrl(brake_latency_s=0.3)
+    ref = _straight_into_corner(straight_m=12.0, radius=6.75)
+    v = 10.0
+    v_set = c._setpoint(VehicleState(vx=v), ref)
+    assert v_set == pytest.approx(c.brake_entry_speed(4.5, ref.s[24] - v * 0.3), rel=1e-6)
