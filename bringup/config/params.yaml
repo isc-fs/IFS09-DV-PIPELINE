@@ -30,6 +30,7 @@ control_node:
     vehicle_mass: 275.0
     unseen_corner_radius: 4.5  # sight distance: slow enough for a hairpin right past the end of the path
     brake_latency_s: 0.3
+    sight_cap_off_modes: ["accel"]  # straight track by rule: no unseen corner past the path
     lookahead_min: 1.0
     lookahead_k: 0.5
     stanley_k: 2.0

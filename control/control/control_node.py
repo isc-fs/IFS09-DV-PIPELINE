@@ -376,6 +376,10 @@ class ControlNode(BaseLifecycleNode):
         # Sight distance: the car must be able to take a corner of this
         # radius right past the end of the visible path (FS hairpin 4.5 m).
         self.declare_parameter("unseen_corner_radius", 4.5)
+        # Missions (mode_manager mode names) with a straight track by rule,
+        # where nothing unseen can lie past the path: the sight cap is off.
+        # Without this, accel tops out at ~9.3 m/s on a 12-15 m path.
+        self.declare_parameter("sight_cap_off_modes", ["accel"])
         # Regen ramp-up + PI lag, taken off every braking distance as v · t.
         self.declare_parameter("brake_latency_s", 0.3)
         # Lowered 1.5 → 1.0 to widen the band where the β·R radius cap
@@ -472,6 +476,16 @@ class ControlNode(BaseLifecycleNode):
 
     # ------------------------------------------------------------------ factory
 
+    def _unseen_corner_radius(self) -> float:
+        """unseen_corner_radius, or 0 (sight cap off) on a straight-track
+        mission such as accel."""
+        off = list(self._p("sight_cap_off_modes") or [])
+        if self._mode_name in off:
+            self.get_logger().info(
+                f"mode={self._mode_name}: straight track, sight-distance cap off")
+            return 0.0
+        return float(self._p("unseen_corner_radius"))
+
     def _build_strategies(self) -> None:
         """Pick controllers from mode_manager behavior (stanley / pure_pursuit)."""
         dc = str(self._p("drive_controller"))
@@ -524,7 +538,7 @@ class ControlNode(BaseLifecycleNode):
                 throttle_max=self._p("throttle_max"),
                 regen_power_w=self._p("regen_power_w"),
                 vehicle_mass=self._p("vehicle_mass"),
-                unseen_corner_radius=self._p("unseen_corner_radius"),
+                unseen_corner_radius=self._unseen_corner_radius(),
                 brake_latency_s=self._p("brake_latency_s"),
                 v_meas_tau=self._p("v_meas_tau"),
                 v_meas_max_accel=self._p("v_meas_max_accel"),
