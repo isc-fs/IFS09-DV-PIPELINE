@@ -355,7 +355,10 @@ class ControlNode(BaseLifecycleNode):
         self.declare_parameter("longitudinal_controller", "pi_velocity")
         # Tunables — passed to the strategy constructors. Keep flat: each
         # strategy reads what it needs, ignores the rest.
-        self.declare_parameter("v_max", 3.0)  # tuning experiment — completable-lap baseline
+        # 5 m/s: the speed sweep (2026-11-09) drove every mission clean at 5;
+        # above it autocross trades cones for time (steering in tight corners
+        # is the limit, not braking). Accel overrides it below.
+        self.declare_parameter("v_max", 5.0)
         # a_lat_max governs corner braking: v_corner = sqrt(R · a_lat_max).
         # 6.0 m/s² (~0.6 g lateral) was the original default — fine for
         # a real FS car on slicks, too generous for the IFS-08 sim's
@@ -437,6 +440,12 @@ class ControlNode(BaseLifecycleNode):
         # (found with tools/long_tuning/long_harness.py).
         self.declare_parameter("deadband_v", 0.05)
         self.declare_parameter("throttle_max", 0.2)
+        # Per-mission overrides: "<mode>.<param>" wins over "<param>" when
+        # mode_manager runs that mode. Accel is straight and the regen
+        # profile stops it past the finish, so it runs at 12 m/s
+        # (sweep: 3/3 at 12.9 s, 0 cones).
+        self.declare_parameter("accel.v_max", 12.0)
+        self.declare_parameter("accel.throttle_max", 0.5)
         # v_meas conditioning for the longitudinal PI — real-car spike
         # rejection at the INPUT (see pi_velocity._condition_velocity).
         # Complements the deadband_v tune above: the deadband widens the
@@ -480,6 +489,14 @@ class ControlNode(BaseLifecycleNode):
         return self.get_parameter(name).value
 
     # ------------------------------------------------------------------ factory
+
+    def _mode_p(self, name: str):
+        """`<mode>.<name>` for the running mode if declared, else `<name>`."""
+        if self._mode_name and self.has_parameter(f"{self._mode_name}.{name}"):
+            value = self._p(f"{self._mode_name}.{name}")
+            self.get_logger().info(f"mode={self._mode_name}: {name}={value}")
+            return value
+        return self._p(name)
 
     def _unseen_corner_radius(self) -> float:
         """unseen_corner_radius, or 0 (sight cap off) on a straight-track
@@ -534,13 +551,13 @@ class ControlNode(BaseLifecycleNode):
         longitudinal: LongitudinalController
         if lon_name == "pi_velocity":
             longitudinal = PIVelocity(
-                v_max=self._p("v_max"),
+                v_max=self._mode_p("v_max"),
                 a_lat_max=self._p("a_lat_max"),
                 a_dec_max=self._p("a_dec_max"),
                 kp=self._p("kp_v"),
                 ki=self._p("ki_v"),
                 deadband=self._p("deadband_v"),
-                throttle_max=self._p("throttle_max"),
+                throttle_max=self._mode_p("throttle_max"),
                 regen_power_w=self._p("regen_power_w"),
                 vehicle_mass=self._p("vehicle_mass"),
                 unseen_corner_radius=self._unseen_corner_radius(),

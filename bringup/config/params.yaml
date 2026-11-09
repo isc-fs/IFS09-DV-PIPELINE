@@ -23,7 +23,7 @@ control_node:
     drive_controller: composite
     lateral_controller: pure_pursuit
     longitudinal_controller: pi_velocity
-    v_max: 3.0  # tuning experiment — completable-lap baseline
+    v_max: 5.0  # every mission clean at 5 in the 2026-11-09 sweep; accel overrides below
     a_lat_max: 3.0
     a_dec_max: 4.0
     regen_power_w: 11000.0  # pack charge limit: 95s6p VTC6 at 5 A/cell; regen is the only service brake
@@ -43,6 +43,9 @@ control_node:
     ki_v: 0.05
     deadband_v: 0.05
     throttle_max: 0.2
+    accel:  # per-mission overrides (mode_manager mode name)
+      v_max: 12.0
+      throttle_max: 0.5
     v_meas_tau: 0.15
     v_meas_max_accel: 20.0
     throttle_rate: 2.0
