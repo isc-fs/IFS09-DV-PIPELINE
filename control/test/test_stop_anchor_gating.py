@@ -141,9 +141,22 @@ def test_anchor_never_unlatches_if_final_lap_drops(node):
 
 
 def test_anchor_position_projected_into_odom(node):
-    """Sanity: the anchor lands ~10 m ahead in world frame, not at the car."""
+    """Sanity: the gate lands ~10 m ahead in world frame, not at the car,
+    and the stop target is stop_past_anchor_m further along the approach."""
+    _past_start(node)
+    node._on_orange(_gate())
+    past = node.get_parameter("stop_past_anchor_m").value
+    ax, ay = node._stop_anchor_xy
+    assert ax == pytest.approx(10.0 + past, abs=0.2)
+    assert ay == pytest.approx(0.0, abs=0.2)
+
+
+def test_skidpad_keeps_the_old_stop_on_the_anchor(node):
+    """Skidpad latches on the centre gate in lap 1: no target past it, and a
+    straight-line distance, so circling past it never reads as 'passed'."""
+    node._mode_name = "skidpad"
     _past_start(node)
     node._on_orange(_gate())
     ax, ay = node._stop_anchor_xy
     assert ax == pytest.approx(10.0, abs=0.2)
-    assert ay == pytest.approx(0.0, abs=0.2)
+    assert node._stop_dir == (0.0, 0.0)

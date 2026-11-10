@@ -23,9 +23,14 @@ control_node:
     drive_controller: composite
     lateral_controller: pure_pursuit
     longitudinal_controller: pi_velocity
-    v_max: 3.0  # tuning experiment — completable-lap baseline
+    v_max: 5.0  # every mission clean at 5 in the 2026-11-09 sweep; accel overrides below
     a_lat_max: 3.0
     a_dec_max: 4.0
+    regen_power_w: 11000.0  # pack charge limit: 95s6p VTC6 at 5 A/cell; regen is the only service brake
+    vehicle_mass: 275.0
+    unseen_corner_radius: 4.5  # sight distance: slow enough for a hairpin right past the end of the path
+    brake_latency_s: 0.3
+    sight_cap_off_modes: ["accel"]  # straight track by rule: no unseen corner past the path
     lookahead_min: 1.0
     lookahead_k: 0.5
     stanley_k: 2.0
@@ -38,12 +43,17 @@ control_node:
     ki_v: 0.05
     deadband_v: 0.05
     throttle_max: 0.2
+    accel:  # per-mission overrides (mode_manager mode name)
+      v_max: 12.0
+      throttle_max: 0.5
     v_meas_tau: 0.15
     v_meas_max_accel: 20.0
     throttle_rate: 2.0
     regen_rate: 3.33
     steering_rate: 5.0
     stop_latch_min_travel: 30.0
+    stop_past_anchor_m: 8.0  # the finish-gate anchor lands 3-5 m short of the line
+    stop_on_anchor_modes: ["skidpad"]  # anchor latches on the centre gate in lap 1: keep the old stop
 
 # cone_slam/cone_slam/cone_graph_slam_node.py
 slam_node:

@@ -52,6 +52,7 @@ from control.controllers.stanley import Stanley
 from control.controllers.pi_velocity import PIVelocity
 from control.models.bicycle import KinematicBicycle
 from control.odom_history import OdomHistory, project_pose, yaw_from_quat
+from control.stop_target import distance_to_stop, stop_target
 
 
 class ControlNode(BaseLifecycleNode):
@@ -110,6 +111,9 @@ class ControlNode(BaseLifecycleNode):
         # tick when the gate is first detected, then frozen as a stop anchor
         # in odom frame (see _on_orange / _stop_distance).
         self._stop_anchor_xy: Optional[tuple[float, float]] = None
+        # Direction the car was heading for the gate when it latched; the
+        # stop distance is measured along it (see stop_target.py).
+        self._stop_dir: tuple[float, float] = (0.0, 0.0)
         self._stop_latched: bool = False
         # Gate for the stop anchor — see _on_orange. Defaults TRUE so a stack
         # with no /slam/final_lap publisher behaves exactly as it did before
@@ -223,6 +227,7 @@ class ControlNode(BaseLifecycleNode):
         self._latest_path_ys = []
         self._latest_path_kappas = []
         self._stop_anchor_xy = None
+        self._stop_dir = (0.0, 0.0)
         self._stop_latched = False
         self._final_lap = True
         self._travelled = 0.0
@@ -350,7 +355,10 @@ class ControlNode(BaseLifecycleNode):
         self.declare_parameter("longitudinal_controller", "pi_velocity")
         # Tunables — passed to the strategy constructors. Keep flat: each
         # strategy reads what it needs, ignores the rest.
-        self.declare_parameter("v_max", 3.0)  # tuning experiment — completable-lap baseline
+        # 5 m/s: the speed sweep (2026-11-09) drove every mission clean at 5;
+        # above it autocross trades cones for time (steering in tight corners
+        # is the limit, not braking). Accel overrides it below.
+        self.declare_parameter("v_max", 5.0)
         # a_lat_max governs corner braking: v_corner = sqrt(R · a_lat_max).
         # 6.0 m/s² (~0.6 g lateral) was the original default — fine for
         # a real FS car on slicks, too generous for the IFS-08 sim's
@@ -362,6 +370,21 @@ class ControlNode(BaseLifecycleNode):
         # a setpoint drop. Tune up later once tire physics is known.
         self.declare_parameter("a_lat_max", 3.0)
         self.declare_parameter("a_dec_max", 4.0)
+        # Regen is the only service brake and it is power limited:
+        # a(v) = min(a_dec_max, regen_power_w / (vehicle_mass · v)). 11 kW is
+        # the IFS-08 pack's charge limit (95s6p Sony VTC6, 5 A/cell = 30 A at
+        # ~370 V). The setpoint brakes back from every corner ahead with it.
+        self.declare_parameter("regen_power_w", 11000.0)
+        self.declare_parameter("vehicle_mass", 275.0)
+        # Sight distance: the car must be able to take a corner of this
+        # radius right past the end of the visible path (FS hairpin 4.5 m).
+        self.declare_parameter("unseen_corner_radius", 4.5)
+        # Missions (mode_manager mode names) with a straight track by rule,
+        # where nothing unseen can lie past the path: the sight cap is off.
+        # Without this, accel tops out at ~9.3 m/s on a 12-15 m path.
+        self.declare_parameter("sight_cap_off_modes", ["accel"])
+        # Regen ramp-up + PI lag, taken off every braking distance as v · t.
+        self.declare_parameter("brake_latency_s", 0.3)
         # Lowered 1.5 → 1.0 to widen the band where the β·R radius cap
         # (in pure_pursuit.py) can actually bind. Previous default left
         # hairpins between R ≈ 1.4 and 2.1 m unguarded — the cap was
@@ -417,6 +440,12 @@ class ControlNode(BaseLifecycleNode):
         # (found with tools/long_tuning/long_harness.py).
         self.declare_parameter("deadband_v", 0.05)
         self.declare_parameter("throttle_max", 0.2)
+        # Per-mission overrides: "<mode>.<param>" wins over "<param>" when
+        # mode_manager runs that mode. Accel is straight and the regen
+        # profile stops it past the finish, so it runs at 12 m/s
+        # (sweep: 3/3 at 12.9 s, 0 cones).
+        self.declare_parameter("accel.v_max", 12.0)
+        self.declare_parameter("accel.throttle_max", 0.5)
         # v_meas conditioning for the longitudinal PI — real-car spike
         # rejection at the INPUT (see pi_velocity._condition_velocity).
         # Complements the deadband_v tune above: the deadband widens the
@@ -446,11 +475,38 @@ class ControlNode(BaseLifecycleNode):
         # detection counts as the finish. Trackdrive courses are >100 m
         # per lap; 30 m is safely past any start-gate proximity.
         self.declare_parameter("stop_latch_min_travel", 30.0)
+        # Stop this far past the finish-gate anchor, measured along the
+        # approach. The anchor lands 3-5 m short of the line, so stopping on
+        # it leaves the car short of the finish (see stop_target.py).
+        self.declare_parameter("stop_past_anchor_m", 8.0)
+        # Modes that keep the old stop: on the anchor, straight-line
+        # distance. Skidpad latches its anchor on the centre gate during the
+        # first lap (it is crossed every lap), so a target past it, measured
+        # along a fixed direction, stopped the car mid-run on the circles.
+        self.declare_parameter("stop_on_anchor_modes", ["skidpad"])
 
     def _p(self, name: str):
         return self.get_parameter(name).value
 
     # ------------------------------------------------------------------ factory
+
+    def _mode_p(self, name: str):
+        """`<mode>.<name>` for the running mode if declared, else `<name>`."""
+        if self._mode_name and self.has_parameter(f"{self._mode_name}.{name}"):
+            value = self._p(f"{self._mode_name}.{name}")
+            self.get_logger().info(f"mode={self._mode_name}: {name}={value}")
+            return value
+        return self._p(name)
+
+    def _unseen_corner_radius(self) -> float:
+        """unseen_corner_radius, or 0 (sight cap off) on a straight-track
+        mission such as accel."""
+        off = list(self._p("sight_cap_off_modes") or [])
+        if self._mode_name in off:
+            self.get_logger().info(
+                f"mode={self._mode_name}: straight track, sight-distance cap off")
+            return 0.0
+        return float(self._p("unseen_corner_radius"))
 
     def _build_strategies(self) -> None:
         """Pick controllers from mode_manager behavior (stanley / pure_pursuit)."""
@@ -495,13 +551,17 @@ class ControlNode(BaseLifecycleNode):
         longitudinal: LongitudinalController
         if lon_name == "pi_velocity":
             longitudinal = PIVelocity(
-                v_max=self._p("v_max"),
+                v_max=self._mode_p("v_max"),
                 a_lat_max=self._p("a_lat_max"),
                 a_dec_max=self._p("a_dec_max"),
                 kp=self._p("kp_v"),
                 ki=self._p("ki_v"),
                 deadband=self._p("deadband_v"),
-                throttle_max=self._p("throttle_max"),
+                throttle_max=self._mode_p("throttle_max"),
+                regen_power_w=self._p("regen_power_w"),
+                vehicle_mass=self._p("vehicle_mass"),
+                unseen_corner_radius=self._unseen_corner_radius(),
+                brake_latency_s=self._p("brake_latency_s"),
                 v_meas_tau=self._p("v_meas_tau"),
                 v_meas_max_accel=self._p("v_meas_max_accel"),
             )
@@ -609,20 +669,29 @@ class ControlNode(BaseLifecycleNode):
         cos_y, sin_y = math.cos(yaw), math.sin(yaw)
         ax = o.pose.pose.position.x + cos_y * sx - sin_y * sy
         ay = o.pose.pose.position.y + sin_y * sx + cos_y * sy
-        self._stop_anchor_xy = (ax, ay)
+        past = float(self.get_parameter("stop_past_anchor_m").value)
+        if self._mode_name in list(self.get_parameter("stop_on_anchor_modes").value or []):
+            # Old behaviour: stop on the anchor, straight-line distance.
+            past = 0.0
+            (tx, ty), self._stop_dir = (ax, ay), (0.0, 0.0)
+        else:
+            (tx, ty), self._stop_dir = stop_target(
+                (o.pose.pose.position.x, o.pose.pose.position.y), (ax, ay), past)
+        self._stop_anchor_xy = (tx, ty)
         self._stop_latched = True
         self.get_logger().info(
             f"stop latched at odom=({ax:.2f}, {ay:.2f}) "
-            f"from {n} big-orange cones"
+            f"from {n} big-orange cones; stopping {past:.1f} m past it "
+            f"at ({tx:.2f}, {ty:.2f})"
         )
 
     def _stop_distance(self, state: VehicleState) -> float:
-        """Euclidean distance from car to the latched stop anchor. Returns
-        +inf when no stop is latched (controller treats this as 'no cap')."""
+        """Distance left to the stop target, along the approach direction;
+        <= 0 once the car is past it. Returns +inf when no stop is latched
+        (controller treats this as 'no cap')."""
         if not self._stop_latched or self._stop_anchor_xy is None:
             return float("inf")
-        ax, ay = self._stop_anchor_xy
-        return math.hypot(ax - state.x, ay - state.y)
+        return distance_to_stop((state.x, state.y), self._stop_anchor_xy, self._stop_dir)
 
     # ------------------------------------------------------------- tick
 
