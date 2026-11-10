@@ -439,13 +439,14 @@ class ControlNode(BaseLifecycleNode):
         # producing the throttle chatter/glitch spikes seen on the bench
         # (found with tools/long_tuning/long_harness.py).
         self.declare_parameter("deadband_v", 0.05)
-        self.declare_parameter("throttle_max", 0.2)
+        # No throttle cap: v_max limits speed, and pipeline_watchdog stops
+        # the stale-pose runaway the old 0.2 cap only slowed down.
+        self.declare_parameter("throttle_max", 1.0)
         # Per-mission overrides: "<mode>.<param>" wins over "<param>" when
         # mode_manager runs that mode. Accel is straight and the regen
         # profile stops it past the finish, so it runs at 12 m/s
         # (sweep: 3/3 at 12.9 s, 0 cones).
         self.declare_parameter("accel.v_max", 12.0)
-        self.declare_parameter("accel.throttle_max", 0.5)
         # v_meas conditioning for the longitudinal PI — real-car spike
         # rejection at the INPUT (see pi_velocity._condition_velocity).
         # Complements the deadband_v tune above: the deadband widens the

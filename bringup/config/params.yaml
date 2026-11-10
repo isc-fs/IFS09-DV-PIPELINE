@@ -42,10 +42,9 @@ control_node:
     kp_v: 0.5
     ki_v: 0.05
     deadband_v: 0.05
-    throttle_max: 0.2
+    throttle_max: 1.0  # no cap: v_max limits speed; pipeline_watchdog stops the stale-pose runaway the old 0.2 cap only slowed
     accel:  # per-mission overrides (mode_manager mode name)
       v_max: 12.0
-      throttle_max: 0.5
     v_meas_tau: 0.15
     v_meas_max_accel: 20.0
     throttle_rate: 2.0

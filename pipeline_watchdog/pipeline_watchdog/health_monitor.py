@@ -13,7 +13,7 @@ pipeline being **dead** — process crash, DDS silence, DVPC power loss.
 It does NOT cover the pipeline being **alive but sick**: mission_control
 happily publishing `DV_RUNNING` at 20 Hz while SLAM has stopped solving. That
 is not hypothetical — it is the documented runaway (see
-`control/control/controllers/pi_velocity.py`, throttle_max rationale):
+`control/control/controllers/pi_velocity.py`, throttle_max history):
 
     "pose froze, controller kept commanding full throttle, real car ran away
      to ~24 m/s and crashed"

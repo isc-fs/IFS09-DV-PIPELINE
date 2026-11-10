@@ -1,5 +1,5 @@
 """Per-mission settings: the sight-distance cap is off in accel only, and
-accel overrides v_max / throttle_max.
+accel overrides v_max; no mission caps the throttle.
 
 Requires rclpy — drives the real ControlNode, not a stub.
 """
@@ -39,14 +39,14 @@ def test_sight_cap_on_elsewhere(node, mode):
         node.get_parameter("unseen_corner_radius").value)
 
 
-def test_accel_overrides_speed_and_throttle(node):
+def test_accel_overrides_speed(node):
     node._mode_name = "accel"
     assert node._mode_p("v_max") == pytest.approx(12.0)
-    assert node._mode_p("throttle_max") == pytest.approx(0.5)
+    assert node._mode_p("throttle_max") == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("mode", ["autocross", "trackdrive", "skidpad", None])
 def test_other_missions_use_the_shared_speed(node, mode):
     node._mode_name = mode
     assert node._mode_p("v_max") == pytest.approx(5.0)
-    assert node._mode_p("throttle_max") == pytest.approx(0.2)
+    assert node._mode_p("throttle_max") == pytest.approx(1.0)

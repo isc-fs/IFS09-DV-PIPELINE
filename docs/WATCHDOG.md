@@ -17,13 +17,13 @@ its last pose and odom forever and has no staleness check of its own.
 
 That is not hypothetical. It is the documented runaway, recorded in
 `control/control/controllers/pi_velocity.py` as the reason `throttle_max`
-exists at all:
+was once capped at 0.2:
 
 > pose froze, controller kept commanding full throttle, real car ran away to
 > ~24 m/s and crashed
 
-`throttle_max` bounds how *fast* that divergence blows up. It does not stop it.
-This node does.
+A throttle cap only bounds how *fast* that divergence blows up. It does not
+stop it. This node does, so the cap is now off (`throttle_max` 1.0).
 
 | Watchdog | Question it answers | Mechanism |
 |---|---|---|

@@ -69,7 +69,7 @@ class PIVelocity(LongitudinalController):
                  ki: float = 0.05,
                  deadband: float = 0.2,
                  lookahead_curvature_s: float = 3.0,
-                 throttle_max: float = 0.6,
+                 throttle_max: float = 1.0,
                  regen_power_w: float = 11000.0,
                  vehicle_mass: float = 275.0,
                  unseen_corner_radius: float = 4.5,
@@ -94,13 +94,13 @@ class PIVelocity(LongitudinalController):
         self.unseen_corner_radius = unseen_corner_radius
         # Distance lost to regen ramp-up and PI lag: v · brake_latency_s.
         self.brake_latency_s = brake_latency_s
-        # Throttle saturation. Lower than the regen cap because if SLAM's
-        # velocity estimate lags reality (we observed this triggering at
-        # ~6 m/s during baseline runs — pose froze, controller kept
-        # commanding full throttle, real car ran away to ~24 m/s and
-        # crashed), a tighter throttle ceiling caps how badly the
-        # state-estimator divergence can blow up. Regen stays at 1.0 so
-        # the controller can still demand max stopping power.
+        # Throttle saturation, 1.0 (no cap) by default. History: it was
+        # 0.6, then 0.2, after a baseline run where SLAM's pose froze at
+        # ~6 m/s, the controller kept commanding full throttle, and the real
+        # car ran away to ~24 m/s and crashed. A cap only slows that
+        # divergence; pipeline_watchdog now stops it (stale /slam/pose or
+        # /odom -> emergency), and v_max limits speed when the estimate is
+        # sane, so the cap is off.
         self.throttle_max = throttle_max
         # v_meas conditioning. In the sim /odom.vx is clean (divergence from
         # true ground speed measured at std 0.024 m/s on a 200 s autocross
