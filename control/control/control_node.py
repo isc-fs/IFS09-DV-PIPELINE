@@ -469,6 +469,11 @@ class ControlNode(BaseLifecycleNode):
         # Each can be raised by parameter for debugging without code
         # changes; setting to a very large number disables that cap.
         self.declare_parameter("throttle_rate", 2.0)
+        # Releasing throttle is the safe direction, so it may fall faster than
+        # it rises: at 2.0/s it took 0.5 s to lift off from full throttle and
+        # the car overshot v_max by ~1 m/s (1-D model of #41's sim check:
+        # 6.2 -> 5.1 m/s with this and PIVelocity._tracking_speed).
+        self.declare_parameter("throttle_release_rate", 8.0)
         self.declare_parameter("regen_rate", 3.33)
         self.declare_parameter("steering_rate", 5.0)
         # Stop-latch guard. The FS start gate is also big-orange, so we
@@ -791,9 +796,10 @@ class ControlNode(BaseLifecycleNode):
         # any real car would do. Values declared in _declare_params.
         dt = 1.0 / self.PUBLISH_RATE_HZ
         thr_step  = self._p("throttle_rate") * dt
+        thr_release = self._p("throttle_release_rate") * dt
         regen_step = self._p("regen_rate")   * dt
         steer_step = self._p("steering_rate") * dt
-        cmd.throttle = _slew(self._last_throttle, cmd.throttle, thr_step)
+        cmd.throttle = _slew(self._last_throttle, cmd.throttle, thr_step, thr_release)
         cmd.brake    = _slew(self._last_regen,    cmd.brake,    regen_step)
         cmd.steering = _slew(self._last_steering, cmd.steering, steer_step)
         self._last_throttle = cmd.throttle
@@ -892,15 +898,18 @@ class ControlNode(BaseLifecycleNode):
         )
 
 
-def _slew(prev: float, target: float, max_step: float) -> float:
-    """Clamp `target` so it differs from `prev` by no more than
-    `max_step`. `max_step` should be positive (rate × dt). Returns the
-    rate-limited value to publish AND to feed back as `prev` next tick.
+def _slew(prev: float, target: float, max_step: float,
+          max_down: float | None = None) -> float:
+    """Clamp `target` so it rises from `prev` by no more than `max_step`
+    and falls by no more than `max_down` (default: `max_step`). Steps
+    should be positive (rate × dt). Returns the rate-limited value to
+    publish AND to feed back as `prev` next tick.
     """
+    down = max_step if max_down is None else max_down
     if target > prev + max_step:
         return prev + max_step
-    if target < prev - max_step:
-        return prev - max_step
+    if target < prev - down:
+        return prev - down
     return target
 
 

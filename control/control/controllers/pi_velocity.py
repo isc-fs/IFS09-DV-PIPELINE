@@ -148,7 +148,24 @@ class PIVelocity(LongitudinalController):
         # The sim-side single-quadrant regen fix (PR #160) ensures regen
         # commanded at vx ≤ 0 produces zero motor torque, so this can't
         # spiral even on transient reverse motion from collisions.
-        return self._track(self._condition_velocity(state.vx), v_set)
+        return self._track(self._tracking_speed(state.vx), v_set)
+
+    def _tracking_speed(self, v_raw: float) -> float:
+        """Speed the PI tracks: the higher of the filtered speed and the
+        plausibility-clamped raw sample.
+
+        The EMA lags the car by about a·v_meas_tau: ~0.9 m/s at full-throttle
+        acceleration (6 m/s², tau 0.15 s). Tracking the filtered value alone,
+        the PI kept the throttle on after the car had reached v_set and
+        overshot v_max by ~1 m/s (sim check on #41: 6.2 m/s at v_max 5).
+        Taking the higher value removes that lag while accelerating and keeps
+        the filter's protection where it matters: a spurious low sample
+        (e.g. a 0 during a filter reset), which would otherwise demand
+        throttle, loses to the filtered value. A spurious high sample is
+        already limited by the clamp to v_meas_max_accel·dt (0.5 m/s), and
+        reading high only eases the throttle."""
+        v_filt = self._condition_velocity(v_raw)
+        return max(v_filt, self._v_prev_raw)
 
     # ----------------------------------------------------- v_meas conditioning
 
