@@ -7,8 +7,8 @@ every signature a race bring-up compiles, then checks that the result is warm.
 * cone_detection: the config cone_detection_node will run. That is the
   strategy's config with params.yaml applied on top, the same merge
   ``ConeDetectionNode._config_from_params`` does. The bake runs it with both
-  ``detector_backend`` values, so flipping that parameter never means a cold
-  boot.
+  ``detector_backend`` values and with the grid clusterer as well, so
+  flipping either parameter never means a cold boot.
 * path_planning: ``warmup_numba_planner`` for every mission type a planner
   strategy uses (trackdrive, acceleration, skidpad), not only trackdrive.
 * Then a verification pass in a fresh interpreter repeats the same warm-ups.
@@ -77,9 +77,12 @@ def cone_detection_configs(path: str | None = None) -> list:
         k: v for k, v in params.items() if k in fields and v != getattr(defaults, k)
     }
     cfg = dataclasses.replace(base or defaults, **changed)
+    # The grid clusterer is Numba, the pypi one is not. Warm grid as well, so
+    # a switch to it, or pypi falling back to it, costs no JIT at bring-up.
     return [
-        dataclasses.replace(cfg, detector_backend=b)
+        dataclasses.replace(cfg, detector_backend=b, cluster_backend=c)
         for b in dict.fromkeys([cfg.detector_backend, "python", "fused"])
+        for c in dict.fromkeys([cfg.cluster_backend, "grid"])
     ]
 
 

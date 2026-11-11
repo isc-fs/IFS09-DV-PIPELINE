@@ -38,8 +38,20 @@ def test_bake_uses_params_yaml_and_both_detector_backends(tmp_path):
         assert c.dbscan_eps == 0.25
 
 
+def test_bake_also_warms_the_grid_clusterer():
+    cfgs = _bake_module().cone_detection_configs(PARAMS)
+    pairs = {(c.detector_backend, c.cluster_backend) for c in cfgs}
+    shipped = ConeDetectionConfig().cluster_backend
+    for b in ("python", "fused"):
+        assert (b, "grid") in pairs
+        assert (b, shipped) in pairs
+
+
 def test_bake_matches_defaults_with_the_shipped_params():
     cfgs = _bake_module().cone_detection_configs(PARAMS)
-    py = next(c for c in cfgs if c.detector_backend == "python")
+    py = next(
+        c for c in cfgs
+        if c.detector_backend == "python" and c.cluster_backend == ConeDetectionConfig().cluster_backend
+    )
     # params.yaml mirrors the code defaults (bringup/test/test_params_file.py)
     assert py == ConeDetectionConfig()
