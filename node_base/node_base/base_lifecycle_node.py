@@ -7,6 +7,8 @@ import rclpy
 from dv_msgs.srv import Setup
 from rclpy.lifecycle import LifecycleNode, State, TransitionCallbackReturn
 
+from node_base.gc_tuning import freeze_heap
+
 
 class ExecutionStrategy(ABC):
     """Abstract base for per-mission execution strategies."""
@@ -105,6 +107,11 @@ class BaseLifecycleNode(LifecycleNode):
         # /Path, /ctrl/cmd_internal — the autonomy looks "active" via
         # transition 3 ok but the data plane stays dark.
         self.get_logger().info(f"Activated in mode: {self._mode_name}")
+        # Configure (warm-ups, JIT) is done: move everything alive now out of
+        # reach of full GC passes, which otherwise land on a scan as a
+        # 130-300 ms stall (see node_base.gc_tuning).
+        frozen, ms = freeze_heap()
+        self.get_logger().info(f"GC: froze {frozen} startup objects ({ms:.0f} ms)")
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
