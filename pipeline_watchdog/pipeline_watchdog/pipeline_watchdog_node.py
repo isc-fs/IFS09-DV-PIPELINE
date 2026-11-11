@@ -13,7 +13,7 @@ uDV trips to its safe state). That covers the pipeline being **dead**.
 
 This node covers the pipeline being **alive but sick** — mission_control
 publishing DV_RUNNING at 20 Hz while the data underneath it has gone stale.
-That is the documented runaway (see `pi_velocity.throttle_max` rationale):
+That is the documented runaway (see `pi_velocity.throttle_max` history):
 "pose froze, controller kept commanding full throttle, real car ran away to
 ~24 m/s and crashed". `control_node` caches its last pose/odom forever and has
 no staleness check of its own, so nothing else in the stack notices.
