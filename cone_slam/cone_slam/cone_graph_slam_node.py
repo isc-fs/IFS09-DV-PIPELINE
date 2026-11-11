@@ -57,6 +57,7 @@ from cone_slam.imu_preintegrator import ImuPreintegrator, ImuSample
 from cone_slam.landmark_db import LandmarkDb
 from cone_slam.lap_counter import LapCounter, LapCounterConfig
 from cone_slam.odom_history import OdomHistory, yaw_from_quat
+from cone_slam.scan_prof import ScanClock
 from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from node_base.base_lifecycle_node import BaseLifecycleNode
@@ -1251,6 +1252,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # wall-clock marks for the SLAM_PROF breakdown (see _emit_slam_prof).
         self._graph.reset_prof()
         self._prof_marks = {"entry": self._on_cones_t0}
+        self._scan_clock_start()
 
         # MarkerArray has no top-level header. Prefer an ADD marker's
         # stamp; fall back to the DELETEALL leader so a cone-empty scan
@@ -2117,6 +2119,13 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._publish_f32(self._pub_age_ms, age_ms)
         self._publish_f32(self._pub_map_size, float(len(self._db)))
 
+    def _scan_clock_start(self) -> None:
+        """Start the scan's CPU / GC counters (see cone_slam.scan_prof)."""
+        clock = getattr(self, "_scan_clock", None)
+        if clock is None:
+            clock = self._scan_clock = ScanClock()
+        clock.start()
+
     def _emit_slam_prof(self, tag: str, n_obs: int) -> None:
         """Emit the per-scan latency breakdown (SLAM_PROF) so we can see
         WHICH stage eats the time as the map grows.
@@ -2132,6 +2141,10 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                    (2 when the pose-jump sanity check re-solves)
           db     — update_from_estimate sweep over every landmark
           pub    — map→odom / state / cone-map publishes
+
+          cpu    — this thread's CPU time over the scan; total − cpu is time
+                   spent preempted or blocked (contention), not working
+          gc     — ms inside the cyclic GC / number of full (gen-2) collections
 
         Grep `SLAM_PROF` and plot against map size to find the slope.
         """
@@ -2156,6 +2169,9 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         commit = seg(commit_start, "commit")
         db = seg("commit", "dbupd")
         pub = (now - m["dbupd"]) * 1e3 if "dbupd" in m else float("nan")
+        clock = getattr(self, "_scan_clock", None)
+        cg = clock.read() if clock is not None else {
+            "cpu_ms": float("nan"), "gc_ms": float("nan"), "gc2": float("nan")}
 
         # Structured sink for offline profiling (run_pipeline_benchmark):
         # the replay sets `_prof_sink` to a callable and receives exactly
@@ -2178,6 +2194,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                     "pub_ms": pub,
                     "n_obs": float(n_obs),
                     "map_size": float(len(self._db)),
+                    **cg,
                 }
             )
 
@@ -2188,6 +2205,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             f"est={self._graph.prof_calcest_ms:6.1f} "
             f"x{self._graph.prof_flushes}) "
             f"db={db:5.1f} pub={pub:5.1f} "
+            f"cpu={cg['cpu_ms']:6.1f} gc={cg['gc_ms']:5.1f}/{cg['gc2']:.0f} "
             f"obs={n_obs} map={len(self._db)}"
         )
         if commit == commit:  # skip NaN (cascade-skip path has no commit)
@@ -2306,6 +2324,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         """
         self._graph.reset_prof()
         self._prof_marks = {"entry": self._on_cones_t0}
+        self._scan_clock_start()
 
         if self._debug_gt_cones:
             observations = self._gt_observations()
