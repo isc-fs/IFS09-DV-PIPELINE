@@ -44,6 +44,7 @@ from cone_detection.cone_fit import (
 from cone_detection.clustering import _warn_once, fast_dbscan
 from cone_detection import fused
 from cone_detection.ground_methods import remove_ground
+from cone_detection.ransac import scan_seed, seed_numba_rng
 from cone_detection.rotations import vectors2matrix
 
 # The config lives in a module with no heavy imports, so the ROS node can declare its
@@ -417,6 +418,8 @@ class RealtimeConeDetector:
         self.last_outlier_xyz = empty
         if len(data) == 0:
             return []
+        if cfg.ransac_seed_per_scan:
+            seed_numba_rng(scan_seed(data))
         if cfg.detector_backend == "fused":
             reason = fused.fused_unsupported_reason(cfg, data, clustering_class)
             if reason is None:

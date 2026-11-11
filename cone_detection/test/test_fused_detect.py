@@ -194,3 +194,49 @@ def test_voxel_first_matches_reference(voxel):
     pts = RNG.normal(0.0, 0.5, (20000, 3))
     idx = fused.voxel_first(pts, voxel, fused._GUARD_KEY_OFFSET, fused._GUARD_KEY_BITS)
     np.testing.assert_array_equal(pts[idx], _voxel_first_points(pts, voxel))
+
+
+def _plain_run(cfg, scans):
+    """Detect without seeding anything here: what the live node does."""
+    det = RealtimeConeDetector(cfg)
+    out = []
+    for scan in scans:
+        dc = {}
+        cones = det.detect(scan, debug_counters=dc)
+        out.append((np.array(cones, dtype=float).reshape(-1, 4), dc, det._prev_plane.copy()))
+    return out
+
+
+@pytest.mark.parametrize("backend", ["python", "fused"])
+def test_per_scan_seed_makes_runs_reproducible(scans, backend):
+    cfg = ConeDetectionConfig(cluster_backend="grid", detector_backend=backend)
+    _seed_numba(1)
+    a = _plain_run(cfg, scans)
+    _seed_numba(2)  # a different RNG state, as in another process
+    b = _plain_run(cfg, scans)
+    for (ca, da, pa), (cb, db, pb) in zip(a, b):
+        assert da == db
+        np.testing.assert_array_equal(pa, pb)
+        np.testing.assert_array_equal(ca, cb)
+
+
+def test_python_and_fused_agree_without_external_seeding(scans):
+    py = _plain_run(ConeDetectionConfig(cluster_backend="grid"), scans)
+    _seed_numba(99)
+    fu = _plain_run(ConeDetectionConfig(cluster_backend="grid", detector_backend="fused"), scans)
+    for (ca, da, pa), (cb, db, pb) in zip(py, fu):
+        assert da == db
+        np.testing.assert_allclose(pb, pa, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(cb, ca, rtol=0, atol=1e-9)
+
+
+def test_scan_seed_depends_on_content():
+    from cone_detection.ransac import scan_seed
+
+    a = RNG.normal(size=(50000, 3)).astype(np.float32)
+    assert scan_seed(a) == scan_seed(a.copy())
+    b = a.copy()
+    b[0, 0] += 1.0
+    assert scan_seed(a) != scan_seed(b)
+    assert scan_seed(a) != scan_seed(a[:-1])
+    assert 0 <= scan_seed(a) < 2**32
