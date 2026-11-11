@@ -95,7 +95,9 @@ class ConeDetectionConfig:
     # to grid/sklearn if it is not installed (install it with `pip install --no-deps dbscan`:
     # it declares numpy>=2, the runtime is pinned to numpy 1.x). pypi uses PARLAY_NUM_THREADS
     # threads (default 1).
-    cluster_backend: str = "pypi"
+    # Default "grid": exact (same partition as sklearn) and faster than pypi on
+    # the RK3588 (dev, full density: about 9 / 16 ms p50 / p95 against 14 / 24 ms).
+    cluster_backend: str = "grid"
 
     # DBSCAN memory/time guard. sklearn's DBSCAN materialises EVERY point's
     # full neighbour list (radius_neighbors), so its cost is
