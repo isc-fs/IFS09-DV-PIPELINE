@@ -41,7 +41,8 @@ from cone_detection.cone_fit import (
     cone_fit_collinear,
     cone_fit_template_dispatch,
 )
-from cone_detection.clustering import fast_dbscan
+from cone_detection.clustering import _warn_once, fast_dbscan
+from cone_detection import fused
 from cone_detection.ground_methods import remove_ground
 from cone_detection.rotations import vectors2matrix
 
@@ -416,6 +417,22 @@ class RealtimeConeDetector:
         self.last_outlier_xyz = empty
         if len(data) == 0:
             return []
+        if cfg.detector_backend == "fused":
+            reason = fused.fused_unsupported_reason(cfg, data, clustering_class)
+            if reason is None:
+                return self._detect_fused(
+                    data,
+                    debug_counters=debug_counters,
+                    compare_logger=compare_logger,
+                    clustering_class=clustering_class,
+                    stage_timings=stage_timings,
+                    ransac_iter_subsample_max=ransac_iter_subsample_max,
+                    viz_full_cloud=viz_full_cloud,
+                )
+            _warn_once(
+                "fused:" + reason.split(" ")[0],
+                f"detector_backend=fused does not support {reason}; using the python path",
+            )
         # Range pre-crop: drop far points before the O(n) RANSAC + DBSCAN
         # instead of clustering ~1000 far groups just to discard them by the
         # range gate. Uses squared radius (no sqrt). Behavior-preserving for
@@ -579,6 +596,78 @@ class RealtimeConeDetector:
             )
         return cone_positions
 
+    def _detect_fused(
+        self,
+        data,
+        *,
+        debug_counters,
+        compare_logger,
+        clustering_class,
+        stage_timings,
+        ransac_iter_subsample_max,
+        viz_full_cloud,
+    ) -> list[tuple[float, float, float, float]]:
+        """``detect`` on the fused Numba backend (see ``cone_detection.fused``).
+
+        Fills the same outputs as the Python path: cones, ``debug_counters``,
+        ``stage_timings``, ``last_outlier_xyz``, ``last_rotated_xyz`` and the
+        warm-start plane.
+        """
+        cfg = self.config
+        st = stage_timings if stage_timings is not None else {}
+        scan = fused.run_scan(
+            data,
+            cfg,
+            initial_plane=self._prev_plane,
+            ransac_iter_subsample_max=ransac_iter_subsample_max,
+            clustering_class=clustering_class,
+            fast_clustering=clustering_class is DBSCAN,
+            stage_timings=st,
+        )
+        if len(scan.cropped) == 0:
+            return []
+        if debug_counters is not None:
+            debug_counters["n_input_points"] = len(scan.cropped)
+            debug_counters["dbscan_guard_dropped"] = int(scan.guard_dropped)
+            debug_counters["dbscan_guard_scans"] = int(scan.guard_dropped > 0)
+        self._prev_plane = scan.coefs
+        self.last_outlier_xyz = np.ascontiguousarray(scan.clean, dtype=np.float32)
+        if viz_full_cloud:
+            self.last_rotated_xyz = rotate_xyz_to_ground(scan.cropped, scan.coefs)
+        if len(scan.labels) == 0:
+            return []
+        cnt = scan.counters
+        if debug_counters is not None:
+            debug_counters["n_clusters"] = int(cnt[fused.N_CLUSTERS])
+            debug_counters["after_min_pts"] = int(cnt[fused.AFTER_MIN_PTS])
+            debug_counters["after_shape_gate"] = int(cnt[fused.AFTER_SHAPE_GATE])
+            debug_counters["after_residual_gate"] = int(cnt[fused.ACCEPTED])
+            debug_counters["accepted"] = int(cnt[fused.ACCEPTED])
+            debug_counters["far_dropped"] = int(cnt[fused.FAR_DROPPED])
+            debug_counters["small_count"] = int(cnt[fused.SMALL])
+            debug_counters["big_count"] = int(cnt[fused.BIG])
+            debug_counters["ambiguous_count"] = int(cnt[fused.AMBIGUOUS])
+        rows = scan.rows
+        n_shape = int(cnt[fused.SHAPE_REJECTED])
+        n_residual = int(cnt[fused.RESIDUAL_REJECTED])
+        if compare_logger is not None and (len(rows) or n_shape or n_residual):
+            if len(rows):
+                rmse_med = float(np.sqrt(np.median(rows[:, 4])))
+                rmse_max = float(np.sqrt(rows[:, 4].max()))
+            else:
+                rmse_med = 0.0
+                rmse_max = 0.0
+            compare_logger.info(
+                f"[cone_fit backend={cfg.fit_backend} fused] kept={len(rows)} "
+                f"(small={int(cnt[fused.SMALL])} big={int(cnt[fused.BIG])} "
+                f"amb={int(cnt[fused.AMBIGUOUS])}) "
+                f"rejected: shape={n_shape} residual={n_residual} "
+                f"| RMSE med={rmse_med * 1000:.1f}mm max={rmse_max * 1000:.1f}mm"
+            )
+        return [
+            (float(r[0]), float(r[1]), float(r[2]), float(r[3])) for r in rows
+        ]
+
 
 _DEFAULT_DETECTOR = RealtimeConeDetector(ConeDetectionConfig())
 
@@ -719,6 +808,8 @@ def warmup_numba_functions(
     detector = RealtimeConeDetector(cfg)
     detector.detect(scan)  # first scan: no previous plane
     detector.detect(scan)  # second scan: warm-plane RANSAC branch
+    if cfg.detector_backend == "fused":
+        fused.warmup()
 
 
 if __name__ == "__main__":

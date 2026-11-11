@@ -156,3 +156,4 @@ cone_detection_node:
     template_early_exit_height_small_m: 0.4
     template_early_exit_height_big_m: 0.5
     fit_backend: template_dispatch
+    detector_backend: python
