@@ -49,9 +49,11 @@ def test_bake_also_warms_the_grid_clusterer():
 
 def test_bake_matches_defaults_with_the_shipped_params():
     cfgs = _bake_module().cone_detection_configs(PARAMS)
-    py = next(
+    default = ConeDetectionConfig()
+    shipped = next(
         c for c in cfgs
-        if c.detector_backend == "python" and c.cluster_backend == ConeDetectionConfig().cluster_backend
+        if c.detector_backend == default.detector_backend
+        and c.cluster_backend == default.cluster_backend
     )
     # params.yaml mirrors the code defaults (bringup/test/test_params_file.py)
-    assert py == ConeDetectionConfig()
+    assert shipped == default
