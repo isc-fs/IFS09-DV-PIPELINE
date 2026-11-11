@@ -12,7 +12,7 @@
 #   deploy/dv                  → /usr/local/bin/dv      (targets dv-pipeline)
 #   deploy/dv_mode_boot.sh     → /usr/local/bin/        (race → dv-pipeline, verified)
 #   deploy/dv_detect_mode.sh   → /usr/local/bin/        (mode detect + override)
-#   deploy/dv_warm_numba.sh    → /usr/local/bin/        (bake Numba JIT cache;
+#   deploy/dv_warm_numba.{sh,py} → /usr/local/bin/      (bake + verify Numba JIT cache;
 #                                hooked as ExecStartPost of the auto-update
 #                                unit + `dv update` + run once at install)
 #   deploy/dv-race.sudoers     → /etc/sudoers.d/dv-race (NOPASSWD dv-pipeline)
@@ -43,6 +43,7 @@ for f in /etc/systemd/system/dv-pipeline.service \
          /usr/local/bin/dv_manual.sh \
          /usr/local/bin/dv_automission.sh \
          /usr/local/bin/dv_warm_numba.sh \
+         /usr/local/bin/dv_warm_numba.py \
          /etc/profile.d/zz-dv-mode-prompt.sh; do
   [ -f "$f" ] && cp -a "$f" "$BK/" && echo "backed up $f"
 done
@@ -58,6 +59,7 @@ install -m 755 "$HERE/dv_record.sh"           /usr/local/bin/dv_record.sh
 install -m 755 "$HERE/dv_manual.sh"           /usr/local/bin/dv_manual.sh
 install -m 755 "$HERE/dv_automission.sh"      /usr/local/bin/dv_automission.sh
 install -m 755 "$HERE/dv_warm_numba.sh"       /usr/local/bin/dv_warm_numba.sh
+install -m 755 "$HERE/dv_warm_numba.py"       /usr/local/bin/dv_warm_numba.py
 
 # Enable the auto-record watcher at boot so "dial at Manual → record" is the
 # default. It is inert until the uDV publishes /ami/mission with the ASMS off
