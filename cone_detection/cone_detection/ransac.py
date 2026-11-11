@@ -7,6 +7,30 @@ would need changes to the cross-product step in the iteration loop.
 """
 import numpy as np
 import numba
+import zlib
+
+
+@numba.njit(cache=True)
+def seed_numba_rng(seed):
+    """Seed Numba's own RNG (separate from numpy's), which ransac2 draws from."""
+    np.random.seed(seed)
+
+
+# Rows hashed per scan: enough to tell scans apart, cheap at any cloud size.
+_SEED_SAMPLE_ROWS = 4096
+
+
+def scan_seed(data) -> int:
+    """32-bit seed derived from a scan's own content.
+
+    The same cloud always gives the same seed, in any process, so RANSAC picks
+    the same plane for it (given the same warm-start plane). The hash covers
+    the point count and an evenly strided sample of up to 4096 rows.
+    """
+    n = len(data)
+    step = max(1, n // _SEED_SAMPLE_ROWS)
+    sample = np.ascontiguousarray(data[::step])
+    return zlib.crc32(sample.tobytes(), n & 0xFFFFFFFF)
 
 
 # cache=True persists compiled machine code in __pycache__ (or

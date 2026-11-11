@@ -76,6 +76,13 @@ class ConeDetectionConfig:
     # RANSAC plane inliers
     ransac_prob: float = 0.9999
     ransac_threshold: float = 0.05
+    # Seed RANSAC from each scan's content (ransac.scan_seed) before fitting the
+    # plane. A scan then always gives the same plane: replays and A/B runs are
+    # reproducible, and the python and fused detectors agree scan by scan.
+    # Unseeded, Numba's RNG starts from OS entropy in every process, and the
+    # plane differs by a few points per scan from run to run. That changed the
+    # cone count on about half the scans of a replay.
+    ransac_seed_per_scan: bool = True
 
     # DBSCAN on rotated above-ground cloud
     dbscan_eps: float = 0.3

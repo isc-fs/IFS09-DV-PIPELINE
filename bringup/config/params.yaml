@@ -136,6 +136,7 @@ cone_detection_node:
     ground_method: ransac
     ransac_prob: 0.9999
     ransac_threshold: 0.05
+    ransac_seed_per_scan: true
     dbscan_eps: 0.3
     dbscan_min_samples: 2
     cluster_backend: pypi
