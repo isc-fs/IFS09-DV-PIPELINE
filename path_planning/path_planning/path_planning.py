@@ -77,6 +77,7 @@ from path_planning.core_types import Cone, Pose2D
 from path_planning.fasttube_adapter import (
     FasttubeAdapter,
     PlanDebug,
+    log_late_numba_compiles,
     warmup_numba_planner,
 )
 from path_planning.planner_strategies import (
@@ -284,8 +285,14 @@ class PathPlanningNode(BaseLifecycleNode):
         self.get_logger().info(
             "warming up FaSTTUBe Numba kernels (~0.5 s cached, tens of s first ever)"
         )
+        # A previous configure's compile logger would report this warm-up.
+        if getattr(self, "_late_compiles", None) is not None:
+            self._late_compiles.close()
+            self._late_compiles = None
         warm_s = warmup_numba_planner(mission_type)
         self.get_logger().info(f"FaSTTUBe Numba warmup complete ({warm_s:.1f} s)")
+        # Any compile from here on is a stall on the /Conos callback: log it.
+        self._late_compiles = log_late_numba_compiles(self.get_logger().error)
 
         # Optional capture file
         self._capture_path = os.environ.get("DV_PLANNER_CAPTURE", "")

@@ -323,7 +323,130 @@ def warmup_numba_planner(
         adapter.plan(cones, pose)
     except Exception:  # pylint: disable=broad-except
         logger.warning("fsd_path_planning Numba warmup failed", exc_info=True)
+    # The 24-cone corridor above is too small and too clean to reach every
+    # signature the live planner hits (SW-04). Two were measured missing after
+    # it, both compiled on the first real /Conos callback:
+    # * vec_dot / norm_of_last_axis / vec_angle_between on 3-D non-contiguous
+    #   ('A' layout) float64 arrays, reached only on a realistic map (5.5 s on
+    #   an M1, about 10 s on the RK3588, cold cache);
+    # * angle_difference on 0-d arrays (a single-vector angle), reached on a
+    #   noisy field.
+    # Numba specialises on rank and layout, not just dtype, so these need
+    # their own warm-up. Both steps below are best-effort, like the one above.
+    try:
+        _warm_realistic_fields(mission)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("fsd_path_planning realistic-field warmup failed", exc_info=True)
+    try:
+        _warm_layout_signatures()
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("fsd_path_planning signature warmup failed", exc_info=True)
     return time.perf_counter() - t0
+
+
+def _loop_track_cones(rng: np.random.Generator, noise_m: float):
+    """A closed ~250 m loop, 3 m wide, cones every 4.5 m per side (~110 cones)
+    plus a few false positives: the size and mess of a real SLAM map.
+
+    Returns (cones, centreline (M, 2), unit tangents (M, 2)).
+    """
+    t = np.linspace(0.0, 2.0 * np.pi, 2000, endpoint=False)
+    r = 40.0 * (1.0 + 0.15 * np.sin(2.0 * t + 0.4) + 0.08 * np.sin(3.0 * t + 1.3))
+    c = np.c_[r * np.cos(t), r * np.sin(t)]
+    seg = np.linalg.norm(np.diff(c, axis=0, append=c[:1]), axis=1)
+    idx = np.searchsorted(np.cumsum(seg), np.arange(0.0, seg.sum(), 4.5))
+    idx = idx[idx < len(c)]
+    tan = np.gradient(c, axis=0)
+    tan /= np.linalg.norm(tan, axis=1)[:, None]
+    nrm = np.c_[-tan[:, 1], tan[:, 0]]
+    pts = np.vstack([c[idx] + 1.5 * nrm[idx], c[idx] - 1.5 * nrm[idx]])
+    pts += rng.normal(0.0, noise_m, pts.shape)
+    ghosts = c[rng.choice(len(c), 6, replace=False)] + rng.normal(0.0, 3.0, (6, 2))
+    pts = np.vstack([pts, ghosts])
+    return [Cone(x=float(x), y=float(y)) for x, y in pts], c, tan
+
+
+def _warm_realistic_fields(mission: MissionTypes) -> None:
+    """Plan on a realistic map from several poses: clean, noisy and few-cone."""
+    rng = np.random.default_rng(0)
+    for noise_m in (0.02, 0.15):
+        adapter = FasttubeAdapter(mission)
+        cones, centre, tan = _loop_track_cones(rng, noise_m)
+        for k in range(0, len(centre), len(centre) // 6):
+            pose = Pose2D(
+                x=float(centre[k, 0]),
+                y=float(centre[k, 1]),
+                yaw=float(math.atan2(tan[k, 1], tan[k, 0])),
+            )
+            adapter.plan(cones, pose)
+    # Few cones ahead of the car (start line, one-sided view).
+    adapter = FasttubeAdapter(mission)
+    few = [Cone(x=4.0, y=1.5), Cone(x=4.0, y=-1.5), Cone(x=8.5, y=1.6)]
+    adapter.plan(few, Pose2D(x=0.0, y=0.0, yaw=0.0))
+
+
+def _warm_layout_signatures() -> None:
+    """Compile the two signature families measured missing after the warm-up
+    (see warmup_numba_planner), by calling the kernels on arrays of that rank
+    and layout. The calls are cheap; the compile is what we want."""
+    from fsd_path_planning.utils import math_utils as mu
+
+    base = np.random.default_rng(1).normal(size=(4, 3, 4))
+    a3 = base[:, :, :2]  # 3-D, non-contiguous: Numba layout 'A'
+    b3 = base[:, :, 2:]
+    mu.vec_dot(a3, b3)
+    mu.norm_of_last_axis(a3)
+    # Call sites may pass clip_cos_theta or leave it at its default, and Numba
+    # compiles those as different signatures: warm both.
+    mu.vec_angle_between(a3, b3)
+    mu.vec_angle_between(a3, b3, True)
+    zero_d = np.asarray(0.5)
+    mu.angle_difference(zero_d, np.asarray(-0.25))
+
+
+class _LateCompileLogger:
+    """Logs every Numba compile that happens after the warm-up."""
+
+    def __init__(self, log_fn):
+        from numba.core import event
+
+        log = log_fn
+
+        class _Listener(event.Listener):
+            def on_start(self, ev):
+                disp = ev.data.get("dispatcher")
+                func = getattr(disp, "py_func", None)
+                module = getattr(func, "__module__", "") or ""
+                if module == "numba" or module.startswith("numba."):
+                    return  # numba's own helpers, compiled inside a user kernel's compile
+                name = f"{module}.{func.__qualname__}" if func is not None else repr(disp)
+                log(f"Numba compile after warm-up (stalls planning): {name}{ev.data.get('args')}")
+
+            def on_end(self, ev):
+                pass
+
+        self.listener = _Listener()
+        event.register("numba:compile", self.listener)
+
+    def close(self) -> None:
+        from numba.core import event
+
+        event.unregister("numba:compile", self.listener)
+
+
+def log_late_numba_compiles(log_fn) -> _LateCompileLogger | None:
+    """After the warm-up, report any compile on the hot path through ``log_fn``.
+
+    A compile there is a multi-second stall on a cold cache. This makes a
+    missed signature visible in the log on the car and in CI, instead of only
+    as a latency spike. Returns the handle (``close()`` removes it), or None if
+    this numba has no event API.
+    """
+    try:
+        return _LateCompileLogger(log_fn)
+    except Exception:  # pylint: disable=broad-except
+        logger.warning("could not install the Numba compile listener", exc_info=True)
+        return None
 
 
 def _xy_to_path_points(xy: np.ndarray,
