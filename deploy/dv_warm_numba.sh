@@ -13,6 +13,9 @@
 # cold compile (~1-2 min, measured 63 s for fsd_path_planning alone) inside
 # mode_manager's 120 s per-node configure budget.
 #
+# The bake and its verification live in dv_warm_numba.py (installed next to
+# this script); this wrapper only sets the environment and the user.
+#
 # Called from:
 #   - dv-pipeline-update.service drop-in (ExecStartPost, installed by
 #     install_dv_pipeline_service.sh) — after every umbilical auto-update
@@ -45,20 +48,10 @@ source /home/isc/dv_ws/install/local_setup.bash 2>/dev/null \
   || { LOG "no dv_ws install — skipping"; exit 0; }
 
 LOG "baking Numba cache into $NUMBA_CACHE_DIR (fast if already warm)…"
-python3 - <<'EOF' || LOG "warmup failed (non-fatal — first bring-up will JIT instead)"
-import time
-
-t0 = time.perf_counter()
-from cone_detection.cone_detection import warmup_numba_functions
-warmup_numba_functions()
-print(f"[warm-numba] cone_detection: {time.perf_counter() - t0:.1f}s", flush=True)
-
-t0 = time.perf_counter()
-from path_planning.fasttube_adapter import warmup_numba_planner
-# Trackdrive is the racing mission; its kernels are the superset shared by
-# the sorter/matcher/parameterization stages the other missions also touch.
-warmup_numba_planner()
-print(f"[warm-numba] fsd_path_planning: {time.perf_counter() - t0:.1f}s", flush=True)
-EOF
+# dv_warm_numba.py bakes every config/mission a bring-up can compile and then
+# verifies, from a fresh interpreter, that the cache really is warm.
+HERE=$(cd "$(dirname "$0")" && pwd)
+python3 "$HERE/dv_warm_numba.py" 2>&1 | while IFS= read -r line; do LOG "${line#\[warm-numba\] }"; done
+[ "${PIPESTATUS[0]}" = 0 ] || LOG "WARNING: cache not warm (non-fatal — first bring-up will JIT instead)"
 LOG "done."
 exit 0
