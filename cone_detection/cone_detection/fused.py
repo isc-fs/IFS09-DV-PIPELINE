@@ -43,6 +43,7 @@ import numba as nb
 import numpy as np
 
 from cone_detection.clustering import fast_dbscan
+from cone_detection.ransac import sample_without_replacement
 from cone_detection.cone_fit import (
     _CONE_BASE_RADIUS_M,
     _CONE_BIG_C,
@@ -127,7 +128,7 @@ def ransac_plane(xyz, prob, threshold, max_iter, n_sub_max, warm):
     m = 3
     n = xyz.shape[0]
     if n > n_sub_max:
-        sub = np.random.choice(n, n_sub_max, replace=False)
+        sub = sample_without_replacement(n, n_sub_max)
         ns = n_sub_max
     else:
         sub = np.arange(n)
