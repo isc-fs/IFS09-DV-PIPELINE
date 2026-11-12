@@ -133,13 +133,14 @@ flowchart TB
 | C | planner warm-up (SW-04) reverted | e4730ed | 43206681091 | 1 / 10 |
 | E | GC freeze removed | 235361a | 43211865554 | 1 / 10 |
 | F | RANSAC per-scan seed off | 0196176 | 43216088577 | 1 / 10 |
+| H | `dev` + only the non-perception changes | d4371db | 43219769501 | **0 / 10**, 0 cones hit |
 
 ```mermaid
 xychart-beta
     title "Acceleration timeouts per 10 runs"
-    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze", "F no seed"]
+    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze", "F no seed", "H dev + non-perception"]
     y-axis "timeouts per 10 runs" 0 --> 5
-    bar [0, 3.75, 3, 1, 1, 1, 1]
+    bar [0, 3.75, 3, 1, 1, 1, 1, 0]
 ```
 
 **What the bisect shows so far:**
@@ -152,12 +153,16 @@ xychart-beta
   acceleration mode, which that planner can't handle, using throwaway planner instances.
 - **The GC freeze alone is cleared** (arm E still fails).
 - **Per-scan seeding alone is cleared** (arm F still fails).
-- **No single change explains it.** Removing any one of them leaves about 1 timeout in 10.
-  The Python detector is unchanged from `dev` apart from seeding. So it's either two changes
-  together, or a timing effect shared by all of them.
-- **Next:** split the branch in half. Arm H is `dev` plus only the non-perception changes:
-  planner warm-up, Numba bake, SLAM profiling and GC freeze. If H fails, the cause is among
-  those; if it passes, the perception changes are needed for it.
+- **Arm H clears every non-perception change together**: `dev`'s perception plus planner
+  warm-up, Numba bake, SLAM profiling and GC freeze finishes 10/10 with no cone hit.
+- **So the cause is in the perception changes.** Every config with `dev`'s perception
+  is clean (0 / 28 runs). Every config with any of our perception changes is not (10 / 58).
+- Arm A (3/10) differs from arm H (0/10) only by per-scan RANSAC seeding (and fused code
+  it doesn't run). Arm F (fused + grid, seeding off) also failed once. The samples are
+  small, so the next round tests each perception change alone on top of arm H with 20 runs:
+  - H + seeding (python + pypi);
+  - H + fused + grid (no seeding).
+
 - In every failure, at 7.4–8.8 s and close to 12 m/s, the car touches blue (left) cones, then
   takes the full-lock steer. `dev` also brushes left cones at that spot (2 cones in 10 runs)
   but recovers. The weakness exists on `dev`; our branch pushes it over the edge more often.
