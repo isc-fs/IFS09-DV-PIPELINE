@@ -134,13 +134,15 @@ flowchart TB
 | E | GC freeze removed | 235361a | 43211865554 | 1 / 10 |
 | F | RANSAC per-scan seed off | 0196176 | 43216088577 | 1 / 10 |
 | H | `dev` + only the non-perception changes | d4371db | 43219769501 | **0 / 10**, 0 cones hit |
+| I | H + per-scan seeding (python + pypi) | 10e5dae | 43223848290 | 2 / 20 |
+| J | H + fused + grid, no seeding | 31ad31e | 43227239895 | 1 / 20 |
 
 ```mermaid
 xychart-beta
     title "Acceleration timeouts per 10 runs"
-    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze", "F no seed", "H dev + non-perception"]
+    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze", "F no seed", "H dev + non-perception", "I H + seed", "J H + fused/grid"]
     y-axis "timeouts per 10 runs" 0 --> 5
-    bar [0, 3.75, 3, 1, 1, 1, 1, 0]
+    bar [0, 3.75, 3, 1, 1, 1, 1, 0, 1, 0.5]
 ```
 
 **What the bisect shows so far:**
@@ -157,11 +159,22 @@ xychart-beta
   warm-up, Numba bake, SLAM profiling and GC freeze finishes 10/10 with no cone hit.
 - **So the cause is in the perception changes.** Every config with `dev`'s perception
   is clean (0 / 28 runs). Every config with any of our perception changes is not (10 / 58).
-- Arm A (3/10) differs from arm H (0/10) only by per-scan RANSAC seeding (and fused code
-  it doesn't run). Arm F (fused + grid, seeding off) also failed once. The samples are
-  small, so the next round tests each perception change alone on top of arm H with 20 runs:
-  - H + seeding (python + pypi);
-  - H + fused + grid (no seeding).
+- **Each perception change on its own tips it over sometimes:**
+
+  | Perception on a clean base | Acceleration timeouts |
+  | --- | --- |
+  | `dev`'s (`dev` ×18, H ×10) | **0 / 28** |
+  | + per-scan seeding only (I, A) | 5 / 30 |
+  | + fused + grid only, no seeding (J, F) | 2 / 30 |
+
+- Neither change alters what a scan's cones *are* in a way the labelled-cone replay can
+  see (same precision and recall). Both change *which* cones come out on borderline scans:
+  seeding fixes the RANSAC draw per scan, and the grid clusterer splits border points
+  differently from pypi. Acceleration at 12 m/s past one stretch of the course is sensitive
+  to that. `dev` brushes the same left cones there but recovers.
+- **Bisecting has reached its limit.** The next step is white-box: record the stack's
+  topics (`/Conos`, SLAM map and pose, `/Path`, control commands) on failing and passing
+  acceleration runs, and compare them where the drift starts (7–9 s, about 12 m/s).
 
 - In every failure, at 7.4–8.8 s and close to 12 m/s, the car touches blue (left) cones, then
   takes the full-lock steer. `dev` also brushes left cones at that spot (2 cones in 10 runs)
