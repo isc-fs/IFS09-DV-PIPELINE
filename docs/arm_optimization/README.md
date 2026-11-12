@@ -18,7 +18,7 @@ its latency budget, without changing what the car sees.
 | Worst planning call | **10 s** (JIT stall) | 18 ms | no stalls | ✅ |
 | Node bring-up, slowest node | 128 s (cold JIT) | 0.9 s | < 120 s per node | ✅ |
 | Detection quality, labelled cones | P 0.979 / R 0.956 | P 0.979 / R 0.955 | no regression | ✅ |
-| IFSSIM CI, acceleration | 18/18 runs finish | **39/48 runs finish** (all our variants) | all finish | ❌ open, being bisected |
+| IFSSIM CI, acceleration | 18/18 runs finish | **48/58 runs finish** (all our variants) | all finish | ❌ open, being bisected |
 
 ¹ Already with thread caps and the grid clusterer. The uncapped `dev` baseline was not run
 end to end under load.

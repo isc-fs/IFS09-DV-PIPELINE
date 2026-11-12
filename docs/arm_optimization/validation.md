@@ -132,27 +132,32 @@ flowchart TB
 | B | fused + pypi | 92cb394 | 43202180731 | 1 / 10 |
 | C | planner warm-up (SW-04) reverted | e4730ed | 43206681091 | 1 / 10 |
 | E | GC freeze removed | 235361a | 43211865554 | 1 / 10 |
+| F | RANSAC per-scan seed off | 0196176 | 43216088577 | 1 / 10 |
 
 ```mermaid
 xychart-beta
     title "Acceleration timeouts per 10 runs"
-    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze"]
+    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze", "F no seed"]
     y-axis "timeouts per 10 runs" 0 --> 5
-    bar [0, 3.75, 3, 1, 1, 1]
+    bar [0, 3.75, 3, 1, 1, 1, 1]
 ```
 
 **What the bisect shows so far:**
-- **The regression is real.** All our arms together time out 9 times in 48 runs (about 1 in 5);
-  `dev` has 0 timeouts in 18. The chance of that by luck at our failure rate is about 2 %.
+- **The regression is real.** All our arms together time out 10 times in 58 runs (about 1 in 6);
+  `dev` has 0 timeouts in 18. The chance of that by luck at our failure rate is about 3 %.
 - **Perception config is cleared** (arm A uses `dev`'s python + pypi and still fails).
 - **The planner warm-up is cleared**, in CI (arm C still fails) and offline: on the RK3588 the
   acceleration planner's paths are bit-for-bit identical with no warm-up, the old warm-up or
   the new one. Its `LinAlgError` lines are harmless noise: the warm-up plans a closed loop in
   acceleration mode, which that planner can't handle, using throwaway planner instances.
 - **The GC freeze alone is cleared** (arm E still fails).
-- **Left in every failing arm:** RANSAC seeded per scan (6d10f6e, `ransac_seed_per_scan: true`).
-  It's the next arm to test. If that also fails, the failure needs two changes together, and
-  the next step is to revert everything except perception and add changes back one at a time.
+- **Per-scan seeding alone is cleared** (arm F still fails).
+- **No single change explains it.** Removing any one of them leaves about 1 timeout in 10.
+  The Python detector is unchanged from `dev` apart from seeding. So it's either two changes
+  together, or a timing effect shared by all of them.
+- **Next:** split the branch in half. Arm H is `dev` plus only the non-perception changes:
+  planner warm-up, Numba bake, SLAM profiling and GC freeze. If H fails, the cause is among
+  those; if it passes, the perception changes are needed for it.
 - In every failure, at 7.4–8.8 s and close to 12 m/s, the car touches blue (left) cones, then
   takes the full-lock steer. `dev` also brushes left cones at that spot (2 cones in 10 runs)
   but recovers. The weakness exists on `dev`; our branch pushes it over the edge more often.
