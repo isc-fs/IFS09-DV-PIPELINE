@@ -33,8 +33,16 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            python3-pip python3-colcon-common-extensions python3-pytest
+            python3-pip python3-colcon-common-extensions python3-pytest git-lfs
           rm -rf /var/lib/apt/lists/*
+
+      - name: Pull Git LFS files
+        # cone_detection/test/golden/scans.npz (test_golden.py) lives in Git LFS.
+        # The container has git but no git-lfs at checkout time, so pull here.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git lfs install --local
+          git lfs pull
 
       - name: Install Python deps
         # Mirrors docker/dv_pipeline_stack/Dockerfile in the IFSSIM repo.
