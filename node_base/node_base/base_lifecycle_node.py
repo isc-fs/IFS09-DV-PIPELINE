@@ -110,8 +110,7 @@ class BaseLifecycleNode(LifecycleNode):
         # Configure (warm-ups, JIT) is done: move everything alive now out of
         # reach of full GC passes, which otherwise land on a scan as a
         # 130-300 ms stall (see node_base.gc_tuning).
-        frozen, ms = freeze_heap()
-        self.get_logger().info(f"GC: froze {frozen} startup objects ({ms:.0f} ms)")
+        # bisect: GC freeze disabled
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
