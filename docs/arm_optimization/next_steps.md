@@ -8,8 +8,8 @@ it's safe on the car, then to buy margin.
 1. **Close the acceleration regression** ([validation](validation.md#4-ifssim-closed-loop-ci)).
    The CI bisect tells us whether it's the detector, the clusterer or a non-perception
    change. Fix it, then rerun acceleration ×10 on the final commit.
-2. **Refreeze the golden fixtures.** The O(k) sample changed the RNG sequence, so the stored
-   reference outputs need regenerating from dc5296d.
+2. ~~Refreeze the golden fixtures.~~ Done: `test_golden.py`, 30 real scans frozen at dc5296d
+   ([validation](validation.md#12-equivalence)).
 3. **Car test** on the Orange Pi, with the thread caps and pinning in the systemd unit and
    the baked cache. Check the bring-up log says `cache warm`.
 

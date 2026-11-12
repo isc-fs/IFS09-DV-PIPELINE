@@ -16,7 +16,7 @@ flowchart LR
 
 | Level | Result |
 | --- | --- |
-| 1. Equivalence tests | ✅ fused == Python on 350/350 scans (plane, cones, counters, max \|Δ\| 7e-13 m) |
+| 1. Equivalence + golden tests | ✅ fused == Python on 350/350 scans (max \|Δ\| 7e-13 m); both reproduce 30 frozen real scans |
 | 2. Real-bag replay | ✅ fused == Python on 1749/1749 scans; map 141 cones on every config |
 | 3. Labelled cones | ✅ precision and recall unchanged within 0.1 point |
 | 4. IFSSIM closed loop | ❌ autocross and skidpad unchanged; **acceleration regressed, being bisected** |
@@ -28,6 +28,12 @@ flowchart LR
 - On the Orange Pi, `dv_fitbench` replays the whole 1,749-scan bag through both paths. It then
   compares per-scan cone count, RANSAC outliers, vetoed points, guard drops and cluster
   count. They match on 1749/1749 scans at dc5296d.
+- **Golden fixtures** (`cone_detection/test/test_golden.py`, frozen at dc5296d): 30 real car
+  scans (every 58th of the bag, Git LFS, 53 MB) and the detector's output for each under the
+  production `params.yaml` config. Both backends must reproduce them: counters exactly, the plane
+  to 1e-9 and cones to 1e-6 m. The outputs are identical on aarch64 (RK3588) and x86_64, so one
+  reference serves both. Regenerate with `cone_detection/test/golden/make_golden.py` after a
+  deliberate output change.
 - Without a seed, two runs of the same code differ on ~60 % of scans. That's why RANSAC is
   now seeded per scan (6d10f6e).
 
@@ -118,9 +124,34 @@ flowchart TB
     Y -->|fails| W[cause is the fused detector]
 ```
 
-| Arm | Branch | Commit | Acceleration |
-| --- | --- | --- | --- |
-| A: python + pypi | `bisect/accel-python-pypi` | 14d1721 | running |
-| B: fused + pypi | `bisect/accel-fused-pypi` | 92cb394 | queued |
+| Arm | Branch | Commit | CI run | Acceleration timeouts |
+| --- | --- | --- | --- | --- |
+| `dev` (python + pypi, none of our code) | – | 6d7228e | 43191687523 + first round | **0 / 8** |
+| 84eb4f4 (fused + grid) | – | 84eb4f4 | 43194657306 + first round | 3 / 8 |
+| A: python + pypi | `bisect/accel-python-pypi` | 14d1721 | 43199204512 | **3 / 10** |
+| B: fused + pypi | `bisect/accel-fused-pypi` | 92cb394 | 43202180731 | 1 / 10 |
+
+```mermaid
+xychart-beta
+    title "Acceleration timeouts per 10 runs (scaled)"
+    x-axis ["dev", "84eb4f4 fused+grid", "A python+pypi", "B fused+pypi"]
+    y-axis "timeouts per 10 runs" 0 --> 5
+    bar [0, 3.75, 3, 1]
+```
+
+**Result: perception is cleared.** Arm A runs `dev`'s own perception setup and still times
+out 3 times in 10, with the same drift-then-full-lock signature. The cause is in what's left
+between `dev` and arm A:
+
+| Candidate | Commit | Notes |
+| --- | --- | --- |
+| Planner warm-up on realistic maps | d7e689b, 8ae0c5d | Only our builds log `fasttube planner raised LinAlgError` during the acceleration warm-up (10–20 per CI run, 0 on `dev`). The library's module-level caches are keyed by a hash of the input bytes, so the warm-up can't poison them. |
+| GC freeze at activation | a48c7ea | Runs in every node, including control. |
+| RANSAC seeded per scan | 6d10f6e | Still on in both arms. |
+| SLAM profiling | 5d5cf3a | Only active when `SLAM_PROF` is set. |
+
+Our branch fails about 1 run in 4 (7 of 28) and `dev` 0 of 8. That still leaves a 1-in-10
+chance `dev` would also show 0 of 8 at our failure rate, so the next round also adds more
+`dev` runs.
 
 The bisect branches exist only for CI and are not to be merged.
