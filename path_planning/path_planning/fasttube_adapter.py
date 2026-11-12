@@ -393,17 +393,13 @@ def _warm_layout_signatures() -> None:
 
     base = np.random.default_rng(1).normal(size=(4, 3, 4))
     a3 = base[:, :, :2]  # 3-D, non-contiguous: Numba layout 'A'
-    c3 = np.ascontiguousarray(base[:, :, 2:])  # 3-D, contiguous: layout 'C'
+    b3 = base[:, :, 2:]
+    mu.vec_dot(a3, b3)
     mu.norm_of_last_axis(a3)
-    mu.norm_of_last_axis(c3)
-    # Every layout pair: the live path mixes them (measured: a sliced 'A' view
-    # against a 'C' array), and each pair is its own signature.
-    for x, y in ((a3, a3), (a3, c3), (c3, a3), (c3, c3)):
-        mu.vec_dot(x, y)
-        # Call sites may pass clip_cos_theta or leave it at its default, and
-        # Numba compiles those as different signatures: warm both.
-        mu.vec_angle_between(x, y)
-        mu.vec_angle_between(x, y, True)
+    # Call sites may pass clip_cos_theta or leave it at its default, and Numba
+    # compiles those as different signatures: warm both.
+    mu.vec_angle_between(a3, b3)
+    mu.vec_angle_between(a3, b3, True)
     zero_d = np.asarray(0.5)
     mu.angle_difference(zero_d, np.asarray(-0.25))
 
