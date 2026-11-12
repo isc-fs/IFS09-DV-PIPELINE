@@ -6,7 +6,6 @@ Cones must match to 1e-9 and every counter, stage count, published cloud and the
 warm-start plane exactly (to float rounding).
 """
 import dataclasses
-import logging
 import math
 
 import numba
@@ -161,12 +160,19 @@ def test_fused_handles_empty_and_tiny_scans():
     _assert_same(cfg, [far, tiny, np.zeros((0, 3), dtype=np.float32)])
 
 
-def test_unsupported_config_falls_back_to_python(scans, caplog):
+def test_unsupported_config_falls_back_to_python(scans, monkeypatch):
+    # Record the warning at its source: the warn-once set may already hold this
+    # key from an earlier test, and other tests (ROS logging) can stop the
+    # module logger from reaching pytest's caplog handler.
+    from cone_detection import clustering
+
+    warned = []
+    monkeypatch.setattr(clustering, "_warned", set())
+    monkeypatch.setattr(clustering._log, "warning", lambda msg, *a, **k: warned.append(msg))
     cfg = ConeDetectionConfig(cluster_backend="grid", ground_method="gpf")
     assert fused.fused_unsupported_reason(cfg, scans[0], None) is not None
-    with caplog.at_level(logging.WARNING):
-        _assert_same(cfg, scans[:1])
-    assert "detector_backend=fused" in caplog.text
+    _assert_same(cfg, scans[:1])
+    assert any("detector_backend=fused" in m for m in warned), warned
 
 
 def test_column_veto_matches_reference():
