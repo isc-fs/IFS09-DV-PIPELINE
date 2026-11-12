@@ -19,7 +19,7 @@ flowchart LR
 | 1. Equivalence + golden tests | ✅ fused == Python on 350/350 scans (max \|Δ\| 7e-13 m); both reproduce 30 frozen real scans |
 | 2. Real-bag replay | ✅ fused == Python on 1749/1749 scans; map 141 cones on every config |
 | 3. Labelled cones | ✅ precision and recall unchanged within 0.1 point |
-| 4. IFSSIM closed loop | ❌ autocross and skidpad unchanged; **acceleration regressed, being bisected** |
+| 4. IFSSIM closed loop | ⚠️ autocross and skidpad unchanged; acceleration fails more often. Traced to stale LiDAR scans in the sim that spawn ghost cones ([below](#recorded-runs-what-actually-goes-wrong)) |
 
 ## 1–2. Equivalence
 
@@ -172,12 +172,86 @@ xychart-beta
   seeding fixes the RANSAC draw per scan, and the grid clusterer splits border points
   differently from pypi. Acceleration at 12 m/s past one stretch of the course is sensitive
   to that. `dev` brushes the same left cones there but recovers.
-- **Bisecting has reached its limit.** The next step is white-box: record the stack's
-  topics (`/Conos`, SLAM map and pose, `/Path`, control commands) on failing and passing
-  acceleration runs, and compare them where the drift starts (7–9 s, about 12 m/s).
-
 - In every failure, at 7.4–8.8 s and close to 12 m/s, the car touches blue (left) cones, then
   takes the full-lock steer. `dev` also brushes left cones at that spot (2 cones in 10 runs)
   but recovers. The weakness exists on `dev`; our branch pushes it over the edge more often.
+- Bisecting stopped here; the recorded runs below explain the mechanism.
 
 The bisect branches exist only for CI and are not to be merged.
+
+### Recorded runs: what actually goes wrong
+
+Every topic except the LiDAR clouds was recorded on gtx1080pc over 15 acceleration runs of
+84eb4f4 and 8 of `dev`. A recorder container on the host network ran next to the stack. One
+run of each failed: 84eb4f4 seed 12 and, for the first time, a `dev` run (seed 6).
+
+**The root cause is in the simulator, not the pipeline.** Each LiDAR scan was compared with
+the sim's true pose and cone positions. The detected cones are accurate to about 1 cm.
+Placing them exactly requires the car's true pose from either 16 ms or 216 ms before the
+scan's stamp, and which one changes from scan to scan:
+
+| | scans whose points are 200 ms older than their stamp | runs with ghost cones in the SLAM map |
+| --- | --- | --- |
+| `dev` 6d7228e | **51 %** (200 / 389) | 7 / 8 |
+| 84eb4f4 | **40 %** (386 / 958) | 15 / 15 |
+
+IFSSIM's bridge stamps each cloud with the capture time the Unreal plugin sends. On those
+scans the points come from a capture two LiDAR periods (200 ms) older than that time. The
+plugin source isn't in the IFSSIM repo, so the exact cause inside it is still open.
+
+```mermaid
+flowchart LR
+    S[sim LiDAR scan<br/>points from t − 200 ms<br/>stamped t] --> D[cone_detection<br/>cones correct to ~1 cm<br/>in the car frame]
+    D --> M[SLAM places them with<br/>the /odom pose at t<br/>= 2.4 m ahead at 12 m/s]
+    M --> G[outside the 1.0 m association gate<br/>and the 1.5 m proximity veto<br/>→ new 'ghost' landmarks]
+    G --> P["/Conos holds two cone rows<br/>2–2.5 m apart"]
+    P --> F[planner pairs real and ghost cones<br/>→ path bends left]
+    F --> C[controller follows<br/>→ full-lock steer → off track]
+    classDef sim fill:#fff3bf,stroke:#e67700
+    classDef bad fill:#ffe3e3,stroke:#c92a2a
+    class S sim
+    class G,P,F,C bad
+```
+
+**Ghosts are in almost every run; only the failing runs act on them.** The planner's path
+leaves the centre line by more than 0.5 m within 10 m only in the two failing runs:
+
+| | first bent path | paths bent > 0.5 m | steering first > 0.3 |
+| --- | --- | --- | --- |
+| 84eb4f4 seed 12 ❌ | 2.7 s | **50 / 76** | 5.3 s, then full lock |
+| `dev` seed 6 ❌ | 5.3 s | **20 / 58** | 7.2 s, then full lock |
+| 20 passing runs | – | 0–2 per run | never (max 0.26) |
+
+```mermaid
+xychart-beta
+    title "Share of scans 200 ms older than their stamp, per run (%)"
+    x-axis ["n1","n2","n3","n4","n5","n6","n7","n8","n9","n10","n11","n12 ❌","n13","n14","n15","d1","d2","d3","d4","d5","d6 ❌","d7","d8"]
+    y-axis "% of scans" 0 --> 80
+    bar [18, 22, 34, 35, 29, 47, 36, 44, 42, 50, 54, 42, 44, 58, 51, 70, 65, 56, 34, 10, 61, 33, 66]
+```
+
+`n` = 84eb4f4 and `d` = `dev`. The failing runs aren't outliers here: stale scans are
+everywhere. The one run with almost none (`d5`, 10 %) is the one run without ghosts.
+
+Ruled out from the recordings:
+- **Odometry.** `/odom` against the truth is the same in every run (about −0.6 m by 3 s).
+- **The odometry lookup in SLAM.** It falls back to the newest `/odom` sample on about 2 of
+  ~130 scans per run.
+- **Detection accuracy.** About 1 cm on both commits.
+
+**What this means for our branch.** The stale scans and the ghosts come from the sim, at a
+similar rate on both commits. Our perception changes don't create them. They change which
+cones a borderline scan yields, and that changes how the ghost rows line up for the planner.
+A stretch where the planner pairs across the two rows then decides the run. That fits the
+bisect: no single change is the cause, and every perception change moves the failure rate.
+The car's real Hesai driver stamps its own scans, so this exact failure shouldn't happen on
+the car. Duplicate landmarks from any pose error would still look the same to the planner.
+
+**Fixes, in order:**
+1. **IFSSIM:** stamp each LiDAR scan with the capture time of the points it carries. Until
+   then, acceleration in CI measures this artifact more than the pipeline.
+2. **SLAM:** reject a scan when most of its cones fail to associate. This is the signature of
+   a bad pose or stamp, and it's better to skip that scan than to add a whole row of new
+   landmarks (the existing cascade guard doesn't catch it).
+3. **Planner:** reject cone pairs whose same-side spacing is under about 3 m. This is cheap
+   insurance against duplicate rows.

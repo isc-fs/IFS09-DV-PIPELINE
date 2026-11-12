@@ -5,9 +5,13 @@ it's safe on the car, then to buy margin.
 
 ## Now
 
-1. **Close the acceleration regression** ([validation](validation.md#4-ifssim-closed-loop-ci)).
-   The CI bisect tells us whether it's the detector, the clusterer or a non-perception
-   change. Fix it, then rerun acceleration ×10 on the final commit.
+1. **Close the acceleration regression**
+   ([validation](validation.md#recorded-runs-what-actually-goes-wrong)). About 40–50 % of
+   the sim's LiDAR scans carry points 200 ms older than their stamp. SLAM turns them into
+   ghost cone rows, and the planner sometimes pairs across those rows. Fix the stamp in
+   IFSSIM first. Then harden SLAM, by rejecting scans where most cones fail to associate,
+   and the planner, by rejecting cone pairs closer than about 3 m on the same side. Rerun
+   acceleration ×10 on the final commit.
 2. ~~Refreeze the golden fixtures.~~ Done: `test_golden.py`, 30 real scans frozen at dc5296d
    ([validation](validation.md#12-equivalence)).
 3. **Car test** on the Orange Pi, with the thread caps and pinning in the systemd unit and
