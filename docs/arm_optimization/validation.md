@@ -19,7 +19,7 @@ flowchart LR
 | 1. Equivalence + golden tests | ✅ fused == Python on 350/350 scans (max \|Δ\| 7e-13 m); both reproduce 30 frozen real scans |
 | 2. Real-bag replay | ✅ fused == Python on 1749/1749 scans; map 141 cones on every config |
 | 3. Labelled cones | ✅ precision and recall unchanged within 0.1 point |
-| 4. IFSSIM closed loop | ⚠️ autocross and skidpad unchanged; acceleration fails more often. Traced to stale LiDAR scans in the sim that spawn ghost cones ([below](#recorded-runs-what-actually-goes-wrong)) |
+| 4. IFSSIM closed loop | ✅ autocross and skidpad unchanged. The acceleration failures came from stale LiDAR scans in the sim ([below](#recorded-runs-what-actually-goes-wrong)); with the sim fix (IFSSIM#864) both commits finish 10/10 with no cone hit |
 
 ## 1–2. Equivalence
 
@@ -249,9 +249,44 @@ the car. Duplicate landmarks from any pose error would still look the same to th
 
 **Fixes, in order:**
 1. **IFSSIM:** stamp each LiDAR scan with the capture time of the points it carries. Until
-   then, acceleration in CI measures this artifact more than the pipeline.
+   then, acceleration in CI measures this artifact more than the pipeline. **Done in
+   isc-fs/IFSSIM#864, merged into IFSSIM `dev` as 1ba1e18, verified below.**
 2. **SLAM:** reject a scan when most of its cones fail to associate. This is the signature of
    a bad pose or stamp, and it's better to skip that scan than to add a whole row of new
    landmarks (the existing cascade guard doesn't catch it).
 3. **Planner:** reject cone pairs whose same-side spacing is under about 3 m. This is cheap
    insurance against duplicate rows.
+
+### Sim fix verified (IFSSIM#864)
+
+The cause was a race in the plugin's GPU readback. The game thread checked that the copy was
+ready before the render thread had started it. On Vulkan the lock then returned the other
+slot's buffer, which held the scan from 200 ms earlier. #864 moves the check into the render
+command that runs after the copy.
+
+The same recording was repeated on a sim packaged from #864 (79d97a3): acceleration ×10 on
+each pipeline commit, same box, same scripts.
+
+| | sim | runs finished | cones hit | scans 200 ms stale | runs with ghost cones | bent paths |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dev` 6d7228e | `dev` | 7 / 8 | 7 | 51 % | 7 / 8 | 20 in the failing run, 2 in one passing run |
+| 84eb4f4 | `dev` | 14 / 15 | 2 | 40 % | 15 / 15 | 50 in the failing run, 1 in one passing run |
+| `dev` 6d7228e | **#864** | **10 / 10** | **0** | **0 %** (0 / 569) | **0 / 10** | **0** |
+| 84eb4f4 | **#864** | **10 / 10** | **0** | **0 %** (0 / 544) | **0 / 10** | **0** |
+
+```mermaid
+xychart-beta
+    title "Scans whose points are 200 ms older than their stamp (%)"
+    x-axis ["dev, old sim", "84eb4f4, old sim", "dev, #864 sim", "84eb4f4, #864 sim"]
+    y-axis "% of scans" 0 --> 60
+    bar [51, 40, 0, 0]
+```
+
+- Every scan now fits the true pose at about −16 ms, which is one sim frame (0.2 m at 12 m/s,
+  well inside the 1.0 m association gate).
+- The sim log's new counter ("not-ready polls") rises on nearly every readback (1942 of 1950).
+  The race happened on almost every scan and is now caught each time.
+- Steering stays under 0.18 in all 20 runs; lap times are unchanged (median 11.65 s `dev`,
+  11.73 s 84eb4f4).
+
+Fixes 2 and 3 are still worth doing for the car, but they no longer block the branch.

@@ -5,13 +5,13 @@ it's safe on the car, then to buy margin.
 
 ## Now
 
-1. **Close the acceleration regression**
-   ([validation](validation.md#recorded-runs-what-actually-goes-wrong)). About 40–50 % of
-   the sim's LiDAR scans carry points 200 ms older than their stamp. SLAM turns them into
-   ghost cone rows, and the planner sometimes pairs across those rows. Fix the stamp in
-   IFSSIM first. Then harden SLAM, by rejecting scans where most cones fail to associate,
-   and the planner, by rejecting cone pairs closer than about 3 m on the same side. Rerun
-   acceleration ×10 on the final commit.
+1. **Rerun `sim-pr` on the fixed sim** ([validation](validation.md#sim-fix-verified-ifssim864)).
+   The acceleration failures were stale sim LiDAR scans. The fix, IFSSIM#864, is merged
+   into IFSSIM `dev` as 1ba1e18. With it, `dev` and 84eb4f4 both finish acceleration 10/10
+   with no cone hit. Once `dev`'s push check has published the fixed CI build, rerun the
+   `sim-pr` check on 84eb4f4 and dc5296d. Treat any sim result at speed from before 1ba1e18
+   as affected by the stale scans. Hardening SLAM and the planner against duplicate cone rows moves
+   to the backlog.
 2. ~~Refreeze the golden fixtures.~~ Done: `test_golden.py`, 30 real scans frozen at dc5296d
    ([validation](validation.md#12-equivalence)).
 3. **Car test** on the Orange Pi, with the thread caps and pinning in the systemd unit and
@@ -46,3 +46,5 @@ flowchart LR
 4. SLAM: vectorise data association and read estimates incrementally. Not needed for budget
    today.
 5. Planning in C++: not needed.
+6. SLAM: reject a scan when most of its cones fail to associate. Planner: reject same-side
+   cone pairs closer than about 3 m. Both guard against duplicate cone rows from a bad pose.
