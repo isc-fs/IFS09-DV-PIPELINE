@@ -139,7 +139,7 @@ cone_detection_node:
     ransac_seed_per_scan: true
     dbscan_eps: 0.3
     dbscan_min_samples: 2
-    cluster_backend: grid
+    cluster_backend: pypi
     dbscan_max_points: 20000
     dbscan_guard_voxel_m: 0.02
     dbscan_guard_voxel_max_m: 0.1
