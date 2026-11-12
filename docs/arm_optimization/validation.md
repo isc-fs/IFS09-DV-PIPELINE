@@ -124,34 +124,37 @@ flowchart TB
     Y -->|fails| W[cause is the fused detector]
 ```
 
-| Arm | Branch | Commit | CI run | Acceleration timeouts |
+| Arm | What differs from 84eb4f4 | Commit | CI run | Acceleration timeouts |
 | --- | --- | --- | --- | --- |
-| `dev` (python + pypi, none of our code) | – | 6d7228e | 43191687523 + first round | **0 / 8** |
-| 84eb4f4 (fused + grid) | – | 84eb4f4 | 43194657306 + first round | 3 / 8 |
-| A: python + pypi | `bisect/accel-python-pypi` | 14d1721 | 43199204512 | **3 / 10** |
-| B: fused + pypi | `bisect/accel-fused-pypi` | 92cb394 | 43202180731 | 1 / 10 |
+| `dev` | none of our changes | 6d7228e | 3 runs | **0 / 18** |
+| 84eb4f4 | – (fused + grid) | 84eb4f4 | 2 runs | 3 / 8 |
+| A | python + pypi (`dev`'s perception) | 14d1721 | 43199204512 | 3 / 10 |
+| B | fused + pypi | 92cb394 | 43202180731 | 1 / 10 |
+| C | planner warm-up (SW-04) reverted | e4730ed | 43206681091 | 1 / 10 |
+| E | GC freeze removed | 235361a | 43211865554 | 1 / 10 |
 
 ```mermaid
 xychart-beta
-    title "Acceleration timeouts per 10 runs (scaled)"
-    x-axis ["dev", "84eb4f4 fused+grid", "A python+pypi", "B fused+pypi"]
+    title "Acceleration timeouts per 10 runs"
+    x-axis ["dev", "84eb4f4", "A py+pypi", "B fused+pypi", "C no warm-up", "E no GC freeze"]
     y-axis "timeouts per 10 runs" 0 --> 5
-    bar [0, 3.75, 3, 1]
+    bar [0, 3.75, 3, 1, 1, 1]
 ```
 
-**Result: perception is cleared.** Arm A runs `dev`'s own perception setup and still times
-out 3 times in 10, with the same drift-then-full-lock signature. The cause is in what's left
-between `dev` and arm A:
-
-| Candidate | Commit | Notes |
-| --- | --- | --- |
-| Planner warm-up on realistic maps | d7e689b, 8ae0c5d | Only our builds log `fasttube planner raised LinAlgError` during the acceleration warm-up (10–20 per CI run, 0 on `dev`). The library's module-level caches are keyed by a hash of the input bytes, so the warm-up can't poison them. |
-| GC freeze at activation | a48c7ea | Runs in every node, including control. |
-| RANSAC seeded per scan | 6d10f6e | Still on in both arms. |
-| SLAM profiling | 5d5cf3a | Only active when `SLAM_PROF` is set. |
-
-Our branch fails about 1 run in 4 (7 of 28) and `dev` 0 of 8. That still leaves a 1-in-10
-chance `dev` would also show 0 of 8 at our failure rate, so the next round also adds more
-`dev` runs.
+**What the bisect shows so far:**
+- **The regression is real.** All our arms together time out 9 times in 48 runs (about 1 in 5);
+  `dev` has 0 timeouts in 18. The chance of that by luck at our failure rate is about 2 %.
+- **Perception config is cleared** (arm A uses `dev`'s python + pypi and still fails).
+- **The planner warm-up is cleared**, in CI (arm C still fails) and offline: on the RK3588 the
+  acceleration planner's paths are bit-for-bit identical with no warm-up, the old warm-up or
+  the new one. Its `LinAlgError` lines are harmless noise: the warm-up plans a closed loop in
+  acceleration mode, which that planner can't handle, using throwaway planner instances.
+- **The GC freeze alone is cleared** (arm E still fails).
+- **Left in every failing arm:** RANSAC seeded per scan (6d10f6e, `ransac_seed_per_scan: true`).
+  It's the next arm to test. If that also fails, the failure needs two changes together, and
+  the next step is to revert everything except perception and add changes back one at a time.
+- In every failure, at 7.4–8.8 s and close to 12 m/s, the car touches blue (left) cones, then
+  takes the full-lock steer. `dev` also brushes left cones at that spot (2 cones in 10 runs)
+  but recovers. The weakness exists on `dev`; our branch pushes it over the edge more often.
 
 The bisect branches exist only for CI and are not to be merged.
