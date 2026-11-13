@@ -44,9 +44,11 @@ if(BUILD_TESTING)
 endif()
 
 if(ament_cmake_FOUND)
-  find_package(ament_cmake_python REQUIRED)
-  _ament_cmake_python_get_python_install_dir()
-  install(TARGETS cone_detection_core DESTINATION "${PYTHON_INSTALL_DIR}")
+  # Where colcon's setup scripts put Python packages on PYTHONPATH. Not
+  # ament_cmake_python's PYTHON_INSTALL_DIR: on Ubuntu 22.04 that resolves to
+  # local/lib/python3.x/dist-packages, which is not on the path.
+  set(CDC_PY_DIR "lib/python${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}/site-packages")
+  install(TARGETS cone_detection_core DESTINATION "${CDC_PY_DIR}")
   install(DIRECTORY include/ DESTINATION include)
   ament_package()
 endif()
