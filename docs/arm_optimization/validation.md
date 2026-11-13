@@ -126,18 +126,21 @@ flowchart TB
     Y -->|fails| W[cause is the fused detector]
 ```
 
+The bisect branches are deleted; each arm's commit is kept as the tag `archive/bisect-<arm>`
+(for example `archive/bisect-h`).
+
 | Arm | What differs from 84eb4f4 | Commit | CI run | Acceleration timeouts |
 | --- | --- | --- | --- | --- |
 | `dev` | none of our changes | 6d7228e | 3 runs | **0 / 18** |
 | 84eb4f4 | – (fused + grid) | 84eb4f4 | 2 runs | 3 / 8 |
-| A | python + pypi (`dev`'s perception) | 14d1721 | 43199204512 | 3 / 10 |
-| B | fused + pypi | 92cb394 | 43202180731 | 1 / 10 |
-| C | planner warm-up (SW-04) reverted | e4730ed | 43206681091 | 1 / 10 |
-| E | GC freeze removed | 235361a | 43211865554 | 1 / 10 |
-| F | RANSAC per-scan seed off | 0196176 | 43216088577 | 1 / 10 |
-| H | `dev` + only the non-perception changes | d4371db | 43219769501 | **0 / 10**, 0 cones hit |
-| I | H + per-scan seeding (python + pypi) | 10e5dae | 43223848290 | 2 / 20 |
-| J | H + fused + grid, no seeding | 31ad31e | 43227239895 | 1 / 20 |
+| A | python + pypi (`dev`'s perception) | 14d1721 (`archive/bisect-a`) | 43199204512 | 3 / 10 |
+| B | fused + pypi | 92cb394 (`archive/bisect-b`) | 43202180731 | 1 / 10 |
+| C | planner warm-up (SW-04) reverted | e4730ed (`archive/bisect-c`) | 43206681091 | 1 / 10 |
+| E | GC freeze removed | 235361a (`archive/bisect-e`) | 43211865554 | 1 / 10 |
+| F | RANSAC per-scan seed off | 0196176 (`archive/bisect-f`) | 43216088577 | 1 / 10 |
+| H | `dev` + only the non-perception changes | d4371db (`archive/bisect-h`) | 43219769501 | **0 / 10**, 0 cones hit |
+| I | H + per-scan seeding (python + pypi) | 10e5dae (`archive/bisect-i`) | 43223848290 | 2 / 20 |
+| J | H + fused + grid, no seeding | 31ad31e (`archive/bisect-j`) | 43227239895 | 1 / 20 |
 
 ```mermaid
 xychart-beta
@@ -392,6 +395,117 @@ xychart-beta
 - **Memory is flat.** The system peaked at 1249 MiB of 5.9 GiB. SLAM stayed at 185 MiB after 1 lap
   and after 10.
 
+### SLAM's core: stop waking for inputs it drops
+
+Core 5 sat at 97 % while SLAM's scan work was a quarter of it. To find the rest, the real car
+bag `manual_20260920_154527` (LiDAR, IMU, wheel speed, steering; 200 s, driving from 40 s)
+was replayed on the Pi through the car launch, with py-spy on SLAM and the kernel's CPU
+counters over the same 90 s of driving.
+
+Most of SLAM's CPU was its single Python executor waking up for messages it then dropped. With
+the default `motion_model=odom` the odometry filter fuses the IMU, wheel speed and steering, and
+SLAM takes its motion from `/odom`:
+
+```mermaid
+flowchart LR
+    IMU["/imu 400 Hz"] -->|calibration only| S[SLAM]
+    RPM["/motor_rpm 100 Hz"] -->|calibration only| S
+    STR["/steering_angle 100 Hz"] -.->|never read| S
+    ODO["/odom 100 Hz"] --> S
+    CONES["/Conos_raw 10 Hz"] --> S
+    S --> CONOS["/Conos every scan<br/>(planning)"]
+    S --> FULL["/Conos_full<br/>(viewers only)"]
+```
+
+| Change | Contract kept | Test |
+| --- | --- | --- |
+| `/steering_angle` subscribed only with `motion_model=imu` | the imu model keeps every input | `test_imu_model_keeps_every_input` |
+| `/imu` and `/motor_rpm` dropped once calibrated | subscribed again on the next activate | `test_odom_model_drops_imu_and_rpm_once_running`, `test_next_run_subscribes_again` |
+| `/Conos` markers reused per landmark | same content, every scan | `test_reused_marker_matches_a_fresh_build`, `test_conos_still_goes_out_every_scan` |
+| `/Conos_full` every 5th scan (`cone_map_full_delta_every_n_scans`), skipped with no subscriber | full map to a new subscriber; `1` restores every scan | `test_full_map_*`, `test_delta_every_scan_restores_the_old_cadence` |
+
+Tests are in `cone_slam/test/test_publish_overhead.py`; all 78 SLAM tests pass on the Pi.
+
+```mermaid
+xychart-beta
+    title "SLAM, % of core 5 while driving (car bag), budget 100 %"
+    x-axis ["before: total", "after: total", "before: waking for inputs", "after: waking for inputs", "before: publishing", "after: publishing", "before: scan work", "after: scan work"]
+    y-axis "% of one core" 0 --> 100
+    bar [72, 30, 57, 18, 8, 5, 7, 8]
+    line [100, 100, 100, 100, 100, 100, 100, 100]
+```
+
+| Car bag, 90 s of driving | before (177fb4c) | after |
+| --- | --- | --- |
+| SLAM CPU (kernel counters) | 72 % | **30 %** |
+| Publishing per scan, mean / p99 | 9.4 / 20.3 ms | **5.7 / 10.2 ms** |
+| Scan time p50 / p99 (budget 100 ms) | 17.4 / 36.2 ms | **13.8 / 32.1 ms** |
+
+**Same output.** The replay runs in real time, so runs differ slightly. Two runs of the old code
+differed by up to 1.5 m in pose; one of them matched the new code within 3 cm, and two runs of
+the new code matched each other within 7 cm. The map ended at 138–139 cones in every run.
+
+What's left outside the scan work, about 18 %, is mostly `/odom` at 100 Hz, which SLAM needs,
+and this replay's sim clock, which the car doesn't have. The car sends these inputs faster than
+the sim (IMU 400 Hz against 185 Hz), so the saving is larger on the car than in HIL.
+
+### A55 cores: leave them floating
+
+The first car layout also put the A55 cores (0-3) on `performance` and pinned one management
+node to each: mode manager 0, mission control 1, watchdog 2, sim supervisor 3. In the next HIL
+session that layout lost more scans than the performance run. So the two were run back to back
+as trackdrive sessions, the same pipeline (177fb4c), only the A55 layout changed.
+
+```mermaid
+flowchart LR
+    subgraph A["A: kept"]
+        A1["A76 4-7 performance<br/>detection 4 · SLAM 5 · planning + control 6 · odometry 7"]
+        A2["A55 0-3 ondemand<br/>management nodes, LiDAR driver, recorder: unpinned"]
+    end
+    subgraph B["B: dropped"]
+        B1["A76 4-7 performance<br/>same pinning"]
+        B2["A55 0-3 performance<br/>mode manager 0 · mission control 1 · watchdog 2 · supervisor 3"]
+    end
+```
+
+Only run 1 of each session counts: the later runs hit a restart bug (below). Driving time after
+the first 40 s:
+
+| Layout | Driving | Scans/s (sim sends 10) | Gaps > 0.25 s per min | Longest gap before the trip | Ran before the trip |
+|---|---|---|---|---|---|
+| **A**: A55 ondemand, unpinned | 16.2 min | **9.37** | **0.62** | 0.39 s | **8 laps** |
+| B: A55 performance, pinned | 5.6 min | 9.01 | 0.89 | 0.42 s | 3 laps |
+
+```mermaid
+xychart-beta
+    title "Scan gaps over 0.25 s per driving minute (lower is better)"
+    x-axis ["ondemand", "performance (A)", "A, rerun", "B: A55 pinned", "B, first session"]
+    y-axis "gaps per minute" 0 --> 1.5
+    bar [0.67, 0.29, 0.62, 0.89, 1.28]
+```
+
+Both trips were the same kind, `/slam/pose` silent for 0.65 s against the 0.60 s budget: one
+long loss, not general load. The network card missed about the same number of frames in each
+session (+15.2 k and +13.7 k). One run per layout is a small sample, but it points the same
+way as the first session (1.28 gaps per minute with B). The car layout keeps the A55 cores on
+the board governor with the management nodes unpinned
+([CHANGELOG](../../deploy/CHANGELOG.md)).
+
+### Restarts after an emergency
+
+In both A/B sessions every run after the first got no scans at all and tripped 5 s after
+arming ("/slam/pose never published"). `/odom`, `/imu` and the clock kept flowing; only
+detection's output stopped. The sim kept sending LiDAR through the resets (checked on the IFSSIM
+side), and on the Pi alone, three ready → drive → emergency → off cycles on the car bag resumed
+detection every time. What differs in HIL is the DDS link: detection re-created its LiDAR reader
+on every activation, and the sim bridge (Fast DDS) sometimes never matched the new reader. A
+later HIL session didn't reproduce it, so it's intermittent.
+
+The fix removes the step: detection creates its LiDAR subscription once at configure and keeps
+it until cleanup; activation only switches scan handling on and off, and an inactive node
+returns before decoding (`cone_detection/test/test_lidar_sub_lifetime.py`). The car-bag cycles
+still resume every time (203, 217, 236 detections per 25 s driving). Not yet confirmed in HIL.
+
 ### Open
 
 1. **Scan drops cause the watchdog trips.** Every trip is `/slam/pose` silent for 0.62–0.63 s:
@@ -401,6 +515,6 @@ xychart-beta
    the whole scan. Moving the interrupts to core 7 reduced the drops but didn't stop them. This is
    specific to the HIL setup: on the car the LiDAR's packets arrive spread evenly over each
    rotation. The next lever is pacing the box's sender.
-2. **Cores 5 and 6 are saturated outside the algorithms.** SLAM computes about 15 ms per 100 ms
-   scan, yet core 5 is about 96 % busy. A large share is publishing, for example about 14 ms per
-   scan building marker arrays.
+2. ~~Core 5 saturated outside SLAM's algorithms.~~ Fixed above: 72 → 30 % on the car bag.
+   **Core 6 still is**: planning and control sit at about 99 %. Planning computes about 50 ms
+   per scan, and control shares its core. Profile it the same way before changing anything.
