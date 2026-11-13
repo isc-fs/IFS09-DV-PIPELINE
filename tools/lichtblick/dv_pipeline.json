@@ -1,0 +1,739 @@
+{
+  "configById": {
+    "3D!scene": {
+      "followTf": "base_link",
+      "followMode": "follow-position",
+      "cameraState": {
+        "perspective": true,
+        "distance": 45,
+        "phi": 55,
+        "thetaOffset": 90,
+        "targetOffset": [
+          8,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#15171c",
+        "labelScaleFactor": 0.6
+      },
+      "transforms": {
+        "editable": false,
+        "showLabel": false,
+        "axisScale": 1.5
+      },
+      "layers": {
+        "grid": {
+          "layerId": "foxglove.Grid",
+          "visible": true,
+          "frameId": "map",
+          "size": 200,
+          "divisions": 100,
+          "lineWidth": 1,
+          "color": "#ffffff20",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "topics": {
+        "/Conos": {
+          "visible": false
+        },
+        "/Conos_full": {
+          "visible": true
+        },
+        "/Conos_raw": {
+          "visible": true
+        },
+        "/Conos_Orange": {
+          "visible": true
+        },
+        "/Path": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.25,
+          "gradient": [
+            "#39ff14ff",
+            "#39ff14ff"
+          ]
+        },
+        "/path_planning/debug": {
+          "visible": false
+        },
+        "/slam/pose": {
+          "visible": true,
+          "type": "arrow",
+          "arrowScale": [
+            2.0,
+            0.4,
+            0.4
+          ],
+          "color": "#ffb000ff"
+        },
+        "/cone_slam/gt_aligned": {
+          "visible": true,
+          "type": "arrow",
+          "arrowScale": [
+            2.0,
+            0.4,
+            0.4
+          ],
+          "color": "#ff40ffff"
+        },
+        "/odom": {
+          "visible": false,
+          "type": "arrow",
+          "arrowScale": [
+            2.0,
+            0.4,
+            0.4
+          ],
+          "color": "#40c0ffff"
+        },
+        "/lidar_points": {
+          "visible": false,
+          "pointSize": 2,
+          "colorField": "z",
+          "colorMode": "colormap",
+          "colorMap": "turbo"
+        },
+        "/lidar_points/above_ground": {
+          "visible": false,
+          "pointSize": 3,
+          "colorField": "z",
+          "colorMode": "colormap",
+          "colorMap": "rainbow"
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26
+      },
+      "imageMode": {}
+    },
+    "StateTransitions!states": {
+      "isSynced": true,
+      "paths": [
+        {
+          "value": "/dv/status.data",
+          "timestampMethod": "receiveTime",
+          "label": "dv/status"
+        },
+        {
+          "value": "/assi/state.data",
+          "timestampMethod": "receiveTime",
+          "label": "ASSI state"
+        },
+        {
+          "value": "/slam/final_lap.data",
+          "timestampMethod": "receiveTime",
+          "label": "final lap"
+        },
+        {
+          "value": "/slam/stop_request.data",
+          "timestampMethod": "receiveTime",
+          "label": "stop request"
+        },
+        {
+          "value": "/slam/finished.data",
+          "timestampMethod": "receiveTime",
+          "label": "finished"
+        },
+        {
+          "value": "/watchdog/emergency.data",
+          "timestampMethod": "receiveTime",
+          "label": "watchdog"
+        },
+        {
+          "value": "/ctrl/emergency.data",
+          "timestampMethod": "receiveTime",
+          "label": "ctrl emergency"
+        },
+        {
+          "value": "/odom_diag/slip_flag.data",
+          "timestampMethod": "receiveTime",
+          "label": "slip"
+        }
+      ]
+    },
+    "RosOut!log": {
+      "searchTerms": [],
+      "minLogLevel": 2,
+      "topicToRender": "/rosout"
+    },
+    "Plot!speed": {
+      "title": "Speed (m/s)",
+      "paths": [
+        {
+          "value": "/odom.twist.twist.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "odom"
+        },
+        {
+          "value": "/testing_only/odom.twist.twist.linear.x",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "ground truth"
+        },
+        {
+          "value": "/control/v_set_mps.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "setpoint"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!cmd": {
+      "title": "Commands",
+      "paths": [
+        {
+          "value": "/control_command.throttle",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "throttle"
+        },
+        {
+          "value": "/control_command.brake",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "brake"
+        },
+        {
+          "value": "/control_command.steering",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "steering"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60,
+      "minYValue": -1.05,
+      "maxYValue": 1.05
+    },
+    "Plot!path": {
+      "title": "Path",
+      "paths": [
+        {
+          "value": "/path_planning/length_m.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "path length m"
+        },
+        {
+          "value": "/control/kappa_max_per_m.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "max curvature 1/m"
+        },
+        {
+          "value": "/path_planning/empty.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "empty plans"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!latency": {
+      "title": "Stage compute (ms) \u2014 scan period 100 ms",
+      "paths": [
+        {
+          "value": "/cone_detection/latency_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "detection"
+        },
+        {
+          "value": "/cone_slam/latency_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "SLAM"
+        },
+        {
+          "value": "/path_planning/latency_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "planning"
+        },
+        {
+          "value": "/control/latency_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "control"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!rate": {
+      "title": "Output rate (Hz) \u2014 10 Hz expected",
+      "paths": [
+        {
+          "value": "/cone_detection/hz.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "detection"
+        },
+        {
+          "value": "/cone_slam/hz.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "SLAM"
+        },
+        {
+          "value": "/path_planning/hz.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "planning"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60,
+      "minYValue": 0,
+      "maxYValue": 12
+    },
+    "Plot!age": {
+      "title": "SLAM input age (ms)",
+      "paths": [
+        {
+          "value": "/cone_slam/age_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "scan age at SLAM"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!slamerr": {
+      "title": "SLAM pose error vs ground truth (m)",
+      "paths": [
+        {
+          "value": "/cone_slam/gt_error_m.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "error"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!map": {
+      "title": "Map",
+      "paths": [
+        {
+          "value": "/cone_slam/map_size.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "cones in map"
+        },
+        {
+          "value": "/cone_slam/n_obs.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "observed this scan"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!det": {
+      "title": "Detections per scan",
+      "paths": [
+        {
+          "value": "/cone_detection/n_accepted.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "accepted"
+        },
+        {
+          "value": "/cone_detection/n_left.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "left"
+        },
+        {
+          "value": "/cone_detection/n_right.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "right"
+        },
+        {
+          "value": "/cone_detection/n_clusters.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "clusters"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Plot!detstage": {
+      "title": "Detection stages (ms)",
+      "paths": [
+        {
+          "value": "/cone_detection/ransac_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "ground RANSAC"
+        },
+        {
+          "value": "/cone_detection/dbscan_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "clustering"
+        },
+        {
+          "value": "/cone_detection/fit_ms.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "cone fit"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "RawMessages!status": {
+      "topicPath": "/dv/status_msg",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all"
+    },
+    "RawMessages!progress": {
+      "topicPath": "/mode_manager/progress",
+      "diffEnabled": false,
+      "diffMethod": "custom",
+      "diffTopicPath": "",
+      "showFullMessageForDiff": false,
+      "expansion": "all"
+    },
+    "Plot!vehicle": {
+      "title": "Steering and brake",
+      "paths": [
+        {
+          "value": "/steering_angle.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "steering angle"
+        },
+        {
+          "value": "/brake_pressure.data",
+          "enabled": true,
+          "timestampMethod": "receiveTime",
+          "label": "brake pressure"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": true,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": true,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "followingViewWidth": 60
+    },
+    "Tab!right": {
+      "activeTabIdx": 0,
+      "tabs": [
+        {
+          "title": "SLAM map",
+          "layout": "3D!map"
+        },
+        {
+          "title": "Driving",
+          "layout": {
+            "first": "Plot!speed",
+            "second": {
+              "first": "Plot!cmd",
+              "second": "Plot!path",
+              "direction": "column",
+              "splitPercentage": 50.0
+            },
+            "direction": "column",
+            "splitPercentage": 33.3
+          }
+        },
+        {
+          "title": "Timing",
+          "layout": {
+            "first": "Plot!latency",
+            "second": {
+              "first": "Plot!rate",
+              "second": "Plot!age",
+              "direction": "column",
+              "splitPercentage": 50.0
+            },
+            "direction": "column",
+            "splitPercentage": 33.3
+          }
+        },
+        {
+          "title": "SLAM & detection",
+          "layout": {
+            "first": "Plot!slamerr",
+            "second": {
+              "first": "Plot!map",
+              "second": {
+                "first": "Plot!det",
+                "second": "Plot!detstage",
+                "direction": "column",
+                "splitPercentage": 50.0
+              },
+              "direction": "column",
+              "splitPercentage": 33.3
+            },
+            "direction": "column",
+            "splitPercentage": 25.0
+          }
+        },
+        {
+          "title": "Mission",
+          "layout": {
+            "first": "RawMessages!status",
+            "second": {
+              "first": "RawMessages!progress",
+              "second": "Plot!vehicle",
+              "direction": "column",
+              "splitPercentage": 50.0
+            },
+            "direction": "column",
+            "splitPercentage": 33.3
+          }
+        }
+      ]
+    },
+    "3D!map": {
+      "followTf": "map",
+      "followMode": "follow-none",
+      "cameraState": {
+        "perspective": false,
+        "distance": 220,
+        "phi": 0,
+        "thetaOffset": 0,
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "scene": {
+        "enableStats": false,
+        "backgroundColor": "#15171c",
+        "labelScaleFactor": 0.6
+      },
+      "transforms": {
+        "editable": false,
+        "showLabel": false,
+        "axisScale": 1.5
+      },
+      "layers": {
+        "grid": {
+          "layerId": "foxglove.Grid",
+          "visible": true,
+          "frameId": "map",
+          "size": 400,
+          "divisions": 40,
+          "lineWidth": 1,
+          "color": "#ffffff20",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ],
+          "order": 1
+        }
+      },
+      "topics": {
+        "/Conos_full": {
+          "visible": true
+        },
+        "/Path": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.25,
+          "gradient": [
+            "#39ff14ff",
+            "#39ff14ff"
+          ]
+        },
+        "/slam/pose": {
+          "visible": true,
+          "type": "arrow",
+          "arrowScale": [
+            2.0,
+            0.4,
+            0.4
+          ],
+          "color": "#ffb000ff"
+        },
+        "/cone_slam/gt_aligned": {
+          "visible": true,
+          "type": "arrow",
+          "arrowScale": [
+            2.0,
+            0.4,
+            0.4
+          ],
+          "color": "#ff40ffff"
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26
+      },
+      "imageMode": {}
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": "3D!scene",
+      "second": {
+        "first": "StateTransitions!states",
+        "second": "RosOut!log",
+        "direction": "row",
+        "splitPercentage": 60
+      },
+      "direction": "column",
+      "splitPercentage": 68
+    },
+    "second": "Tab!right",
+    "direction": "row",
+    "splitPercentage": 60
+  }
+}

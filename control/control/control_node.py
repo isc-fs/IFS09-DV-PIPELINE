@@ -123,6 +123,9 @@ class ControlNode(BaseLifecycleNode):
         self._final_lap: bool = True
         # Travel distance (odom-frame) used as the gate-latch guard.
         self._travelled: float = 0.0
+        # Travel at which _final_lap last rose (0 when it starts true). The
+        # stop latch needs stop_latch_min_travel past this too: see _on_orange.
+        self._final_lap_from: float = 0.0
         self._last_pose_xy: Optional[tuple[float, float]] = None
 
         # Last published command — input to the actuator slew limiter.
@@ -231,6 +234,7 @@ class ControlNode(BaseLifecycleNode):
         self._stop_latched = False
         self._final_lap = True
         self._travelled = 0.0
+        self._final_lap_from = 0.0
         self._last_pose_xy = None
         self._last_throttle = 0.0
         self._last_regen = 0.0
@@ -616,6 +620,13 @@ class ControlNode(BaseLifecycleNode):
         topic rather than inheriting the last run's.
         """
         value = bool(msg.data)
+        if value and not self._final_lap:
+            # SLAM raises final_lap as the car crosses the line that starts the
+            # closing lap, with that line's big-orange gate still in view.
+            # Measure the latch's travel guard from here so that gate can't
+            # latch the stop: the car would brake one lap early (trackdrive
+            # parked after lap 9 and SLAM, stuck at 9/10, never finished).
+            self._final_lap_from = self._travelled
         if value != self._final_lap:
             self.get_logger().info(
                 f"/slam/final_lap → {value}"
@@ -649,7 +660,8 @@ class ControlNode(BaseLifecycleNode):
         cones = [m for m in msg.markers if m.action != Marker.DELETEALL]
         if len(cones) < 2:
             return
-        if self._travelled < self.get_parameter("stop_latch_min_travel").value:
+        min_travel = self.get_parameter("stop_latch_min_travel").value
+        if self._travelled < min_travel:
             return
         # Lap gate: only latch on the CLOSING lap's gate. Without this,
         # trackdrive brakes to a stop at the first big-orange gate past
@@ -663,6 +675,11 @@ class ControlNode(BaseLifecycleNode):
         # (1 lap), accel and skidpad, SLAM publishes true immediately, so this
         # gate is transparent and only trackdrive's behaviour changes.
         if not self._final_lap:
+            return
+        # ...and not on the gate that STARTS the closing lap: final_lap rises
+        # while the car is still at that line (see _on_final_lap), so the same
+        # travel guard applies again from where it rose.
+        if self._travelled - self._final_lap_from < min_travel:
             return
         # Centroid in base_link
         n = len(cones)

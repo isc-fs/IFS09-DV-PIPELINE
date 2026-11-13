@@ -15,7 +15,12 @@ it's safe on the car, then to buy margin.
 2. ~~Refreeze the golden fixtures.~~ Done: `test_golden.py`, 30 real scans frozen at dc5296d
    ([validation](validation.md#12-equivalence)).
 3. **Car test** on the Orange Pi, with the thread caps and pinning in the systemd unit and
-   the baked cache. Check the bring-up log says `cache warm`.
+   the baked cache. Check the bring-up log says `cache warm`. Add two board settings measured in
+   the [HIL full check](validation.md#5-hardware-in-the-loop-the-full-sim-check-on-the-orange-pi):
+   - the `performance` governor on the A76 cores (detection p99 9.6 → 5.9 ms, at no extra heat);
+   - the network interrupts off core 4, the detection core (for example on core 7).
+4. **HIL scan drops.** Pace the sim box's LiDAR sender so a scan doesn't reach the Pi as one
+   1.5 MB burst; until then a watchdog trip now and then is the LAN, not the pipeline.
 
 ## Then: C++ core (Sprint 2, 2–3 weeks)
 
@@ -46,5 +51,7 @@ flowchart LR
 4. SLAM: vectorise data association and read estimates incrementally. Not needed for budget
    today.
 5. Planning in C++: not needed.
-6. SLAM: reject a scan when most of its cones fail to associate. Planner: reject same-side
+6. Cores 5 and 6 sit at about 96–99 % while SLAM computes about 15 ms per scan: cut the publishing
+   overhead around the algorithms (about 14 ms per scan building SLAM's marker arrays).
+7. SLAM: reject a scan when most of its cones fail to associate. Planner: reject same-side
    cone pairs closer than about 3 m. Both guard against duplicate cone rows from a bad pose.

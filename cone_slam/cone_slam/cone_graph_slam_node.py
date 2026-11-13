@@ -904,10 +904,18 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 Track, "/testing_only/track", self._on_track, track_qos
             )
 
-        # Latch /slam/finished=false on activate (#384 stub). The
-        # publisher exists from on_configure; this fires the default
-        # value so a subscriber that joins between configure and
-        # activate sees a defined latched state.
+        # The latched mission-start values below go out AFTER the base class
+        # has activated the lifecycle publishers: before that, publish() is a
+        # silent no-op (see BaseLifecycleNode.on_activate). Publishing them
+        # first dropped them, so subscribers kept the previous run's latched
+        # values: after an autocross (final_lap=true) a trackdrive's control
+        # still read final_lap=true and stopped at the end of lap 1.
+        ret = super().on_activate(state)
+        if ret != TransitionCallbackReturn.SUCCESS:
+            return ret
+
+        # Latch /slam/finished=false on activate (#384 stub), so a late
+        # subscriber sees a defined latched state.
         if self._finished_pub is not None:
             self._finished_pub.publish(Bool(data=False))
         # Same for /slam/final_lap — publish the mission's STARTING value,
@@ -916,8 +924,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # would never arm its stop anchor for those missions.
         self._publish_final_lap(force=True)
         self._publish_stop_request(force=True)
-
-        return super().on_activate(state)
+        return ret
 
     def on_deactivate(self, state: LifecycleState) -> TransitionCallbackReturn:
         self.get_logger().info("on_deactivate: dropping subscriptions")

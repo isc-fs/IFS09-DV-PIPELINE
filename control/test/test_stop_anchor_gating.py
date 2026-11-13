@@ -105,7 +105,8 @@ def test_latches_once_final_lap_arrives(node):
     for _ in range(9):                      # nine laps' worth of gate sightings
         node._on_orange(_gate())
     assert not node._stop_latched
-    node._on_final_lap(Bool(data=True))     # closing lap
+    node._on_final_lap(Bool(data=True))     # closing lap starts here...
+    node._travelled += MIN_TRAVEL + 5.0     # ...and its gate comes a lap later
     node._on_orange(_gate())
     assert node._stop_latched
     assert node._stop_anchor_xy is not None
@@ -160,3 +161,37 @@ def test_skidpad_keeps_the_old_stop_on_the_anchor(node):
     ax, ay = node._stop_anchor_xy
     assert ax == pytest.approx(10.0, abs=0.2)
     assert node._stop_dir == (0.0, 0.0)
+
+
+# ------------------------------------------- the gate that starts the closing lap
+
+def test_does_not_latch_on_the_gate_where_final_lap_rises(node):
+    """Trackdrive: SLAM raises final_lap as the car crosses the line that
+    starts lap 10, with that line's gate still in view. Latching it would park
+    the car after lap 9, and SLAM, stuck at 9/10, would never finish."""
+    node._travelled = 4660.0                  # nine laps in
+    node._on_final_lap(Bool(data=False))
+    node._on_final_lap(Bool(data=True))       # 9/10: crossing the line now
+    node._on_orange(_gate())                  # ...the same gate, still in view
+    assert not node._stop_latched, "braked on the gate that starts the closing lap"
+    node._travelled += MIN_TRAVEL - 1.0
+    node._on_orange(_gate())
+    assert not node._stop_latched
+
+
+def test_latches_on_the_closing_gate_one_lap_later(node):
+    node._travelled = 4660.0
+    node._on_final_lap(Bool(data=False))
+    node._on_final_lap(Bool(data=True))
+    node._travelled += 500.0                  # the closing lap
+    node._on_orange(_gate())
+    assert node._stop_latched
+
+
+def test_final_lap_true_from_the_start_is_unchanged(node):
+    """Autocross/accel/skidpad: final_lap is true from activate, so only the
+    usual travel guard from the start applies."""
+    node._on_final_lap(Bool(data=True))
+    _past_start(node)
+    node._on_orange(_gate())
+    assert node._stop_latched

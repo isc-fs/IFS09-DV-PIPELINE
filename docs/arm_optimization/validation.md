@@ -1,17 +1,18 @@
 # Validation: is the output still the same?
 
 A faster detector is worthless if it sees different cones. Every change was checked at
-four levels, from cheapest to closest to the car:
+five levels, from cheapest to closest to the car:
 
 ```mermaid
 flowchart LR
     U[1. Unit + equivalence tests<br/>same seed → same cones] --> B[2. Real-bag replay on the RK3588<br/>1,749 scans, per-scan counters]
     B --> G[3. Labelled-cone replay<br/>precision / recall against ground truth]
     G --> S[4. Closed-loop sim in IFSSIM CI<br/>the car drives the missions]
+    S --> H[5. Hardware in the loop<br/>the pipeline on the RK3588, all missions]
     classDef ok fill:#d4f4dd,stroke:#2b8a3e
     classDef open fill:#ffe3e3,stroke:#c92a2a
-    class U,B,G ok
-    class S open
+    class U,B,G,S ok
+    class H open
 ```
 
 | Level | Result |
@@ -20,6 +21,7 @@ flowchart LR
 | 2. Real-bag replay | ✅ fused == Python on 1749/1749 scans; map 141 cones on every config |
 | 3. Labelled cones | ✅ precision and recall unchanged within 0.1 point |
 | 4. IFSSIM closed loop | ✅ autocross and skidpad unchanged. The acceleration failures came from stale LiDAR scans in the sim ([below](#recorded-runs-what-actually-goes-wrong)); with the sim fix (IFSSIM#864) both commits finish 10/10 with no cone hit |
+| 5. Hardware in the loop | ⚠️ every mission drives on the Orange Pi; two trackdrive bugs fixed; dropped LiDAR scans over the LAN still trip the watchdog now and then ([below](#5-hardware-in-the-loop-the-full-sim-check-on-the-orange-pi)) |
 
 ## 1–2. Equivalence
 
@@ -290,3 +292,115 @@ xychart-beta
   11.73 s 84eb4f4).
 
 Fixes 2 and 3 are still worth doing for the car, but they no longer block the branch.
+
+## 5. Hardware in the loop: the full sim check on the Orange Pi
+
+The sim acts as the car. IFSSIM runs on the GPU box, and the pipeline runs on an Orange Pi 5
+Plus (RK3588) over the LAN, with the same pinning and thread caps as the car. All four missions
+run: acceleration, skidpad, autocross on 4 tracks, and trackdrive (10 laps) on the same 4.
+
+```mermaid
+flowchart LR
+    subgraph Box["GPU box (sim = the car)"]
+        SIM[IFSSIM] --> BR[sim bridge<br/>LiDAR, odom, IMU]
+        MC[Mission Control] 
+        REC[recorder + viewer bridge]
+    end
+    subgraph Pi["Orange Pi 5 Plus (RK3588)"]
+        D[detection<br/>core 4] --> S[SLAM<br/>core 5] --> P[planning + control<br/>core 6]
+        O[odometry filter<br/>core 7]
+        A[mission control, watchdog<br/>cores 0-3]
+    end
+    BR -->|LiDAR 10 Hz, ~1.5 MB/scan<br/>DDS over 1 Gb/s LAN| D
+    P -->|commands| BR
+    MC <-->|mission, state| A
+```
+
+Two runs, the same in everything but the clocks:
+
+- **ondemand**: the board's default CPU governor, with network interrupts on any core (in
+  practice all on core 4).
+- **performance**: the A76 cores locked at 2256 MHz, with network interrupts moved to core 7.
+
+### Two trackdrive bugs, found and fixed
+
+Neither depends on the Pi; both are on `dev` too. CI never caught them because it only runs
+acceleration.
+
+1. **SLAM's mission-start signals were dropped.** SLAM published `/slam/final_lap` before its
+   lifecycle publishers were active, so the message went nowhere. Control kept the previous
+   run's latched `true`, and trackdrive stopped after lap 1. Fix: publish after the base
+   `on_activate`. Test: `cone_slam/test/test_activate_latches.py`.
+2. **The car stopped a lap early.** SLAM counts a lap within 6 m of the start line, so
+   `final_lap` rises while the start/finish gate is still in view. Control latched that gate
+   and parked after lap 9. SLAM, stuck at 9/10, never finished. Fix: once `final_lap` rises
+   mid-run, control needs `stop_latch_min_travel` (30 m) of new travel before it may latch.
+   Tests: `control/test/test_stop_anchor_gating.py`.
+
+With both fixed, every trackdrive that wasn't cut short drove 10/10 laps and finished by itself.
+
+### Results
+
+| Mission | ondemand | performance |
+| --- | --- | --- |
+| Acceleration | ✅ 13.95 s, 0 cones | ✅ 13.80 s, 0 cones |
+| Skidpad | ✅ 50.15 s, 1 cone | ✅ 50.18 s, 0 cones |
+| Autocross × 4 | ✅ all finished, 2–6 cones each | ✅ all finished, 4–8 cones each |
+| Trackdrive 3721 | ✅ 10 laps, 1054.7 s | ❌ watchdog trip at 62 s |
+| Trackdrive 3723 | ✅ 10 laps, 705.8 s | ✅ 10 laps, 700.9 s |
+| Trackdrive 3725 | ❌ watchdog trip, lap 3 | ✅ 10 laps, 809.0 s, 2 cones |
+| Trackdrive 3726 | ❌ watchdog trip, lap 6 | ✅ 10 laps, 859.8 s |
+
+Latency while driving, every mission (p99, ms; the scan period is 100 ms):
+
+```mermaid
+xychart-beta
+    title "p99 latency while driving (ms), budget 100 ms"
+    x-axis ["detect, ondemand", "detect, perf", "SLAM, ondemand", "SLAM, perf", "plan, ondemand", "plan, perf", "scan→cones, ondemand", "scan→cones, perf"]
+    y-axis "ms" 0 --> 180
+    bar [9.6, 5.9, 30.3, 28.3, 60.6, 59.9, 170.8, 119.8]
+    line [100, 100, 100, 100, 100, 100, 100, 100]
+```
+
+| Stage, p50 / p99 (ms) | ondemand | performance |
+| --- | --- | --- |
+| Detection compute | 6.1 / 9.6 | **3.8 / 5.9** |
+| SLAM compute | 15.9 / 30.3 | 14.0 / 28.3 |
+| Planning compute | 48.2 / 60.6 | 50.8 / 59.9 |
+| Scan stamp → detections back at the box | 101.4 / 170.8 | **89.1 / 119.8** |
+
+"Scan → cones" includes about 85 ms of sim scan timing and the LAN in both directions; the car
+has neither. What matters here is the difference between the two runs.
+
+Core load while driving (mean %):
+
+```mermaid
+xychart-beta
+    title "Core busy while driving (%), mean"
+    x-axis ["core 4 detect, ondemand", "core 4 detect, perf", "core 5 SLAM, ondemand", "core 5 SLAM, perf", "core 6 plan+ctrl, ondemand", "core 6 plan+ctrl, perf", "core 7 odom, ondemand", "core 7 odom + net IRQ, perf"]
+    y-axis "%" 0 --> 100
+    bar [51, 32, 96, 97, 98, 99, 13, 24]
+```
+
+- **The performance governor is free.** The hottest zone peaked at 55.5 °C, against 56.4 °C on
+  ondemand; throttling starts at 75 °C. On ondemand the A76 cores spent much of the run between
+  408 and 1416 MHz, because detection's 10 Hz bursts look idle to a 10 ms sampler.
+- **Lap times are steadier.** On trackdrive 3723 every lap took 70.0–70.1 s on performance,
+  against 70.2–71.3 s on ondemand.
+- **Cones hit don't follow latency.** Autocross hits 2–8 cones per track under both. That's the
+  planner or controller cutting corners, not the board.
+- **Memory is flat.** The system peaked at 1249 MiB of 5.9 GiB. SLAM stayed at 185 MiB after 1 lap
+  and after 10.
+
+### Open
+
+1. **Scan drops cause the watchdog trips.** Every trip is `/slam/pose` silent for 0.62–0.63 s:
+   6 scans in a row missing. The Pi's network card misses frames when a 1.5 MB scan arrives as one
+   burst (`rx_mac_missed` +46 k frames over the performance run). Its 1024-frame ring is at the
+   maximum and the driver can't coalesce interrupts. LiDAR is best effort, so one lost frame loses
+   the whole scan. Moving the interrupts to core 7 reduced the drops but didn't stop them. This is
+   specific to the HIL setup: on the car the LiDAR's packets arrive spread evenly over each
+   rotation. The next lever is pacing the box's sender.
+2. **Cores 5 and 6 are saturated outside the algorithms.** SLAM computes about 15 ms per 100 ms
+   scan, yet core 5 is about 96 % busy. A large share is publishing, for example about 14 ms per
+   scan building marker arrays.
