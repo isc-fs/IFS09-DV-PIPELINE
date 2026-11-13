@@ -59,6 +59,7 @@ Comparing two runs scan by scan (cones, outliers, vetoed, guard drops, clusters)
 | `pipeline_kernels_bench.py` | each detector stage, Python against fused, with an equivalence check |
 | `blas_thread_probe.py` | detection with and without thread caps, with and without load |
 | `planner_jit_probe.py` | Numba compiles after the planner warm-up, over 2,000 cone fields |
+| `tools/detect_backend_bench.py` (this repo) | decode + detect per scan and per stage for one `detector_backend`, from a bag or the golden scans; run once per backend |
 
 ## Labelled-cone replay and closed loop (IFSSIM)
 
