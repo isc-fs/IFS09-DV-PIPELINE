@@ -27,14 +27,15 @@ compile happens once at configure and persists across SLAM/control restarts duri
 Lifecycle layout (driven by mode_manager → change_state):
 
   on_configure    create lifecycle publishers + strategy ``configure()`` (Numba
-                  warmup — the expensive ~10–20 s step). Lands during Phase 1
-                  ``warming_up``; supervisor heartbeats absorb the delay so
-                  downstream timeouts do not trip.
-  on_activate     create LiDAR subscription, reset per-second diag counters,
+                  warmup — the expensive ~10–20 s step) + the LiDAR subscription.
+                  Lands during Phase 1 ``warming_up``; supervisor heartbeats
+                  absorb the delay so downstream timeouts do not trip.
+  on_activate     reset per-second diag counters, start handling scans,
                   ``super().on_activate()`` flips publishers to emitting state.
-  on_deactivate   destroy LiDAR subscription so a deactivated node does not burn
-                  CPU parsing dropped scans.
-  on_cleanup      destroy publishers and strategy. Re-configuring re-runs warmup
+  on_deactivate   stop handling scans (the callback returns before decoding).
+                  The LiDAR subscription stays: one DDS reader for the node's
+                  life, so a remote writer never has to re-match it per mission.
+  on_cleanup      destroy LiDAR subscription, publishers and strategy. Re-configuring re-runs warmup
                   (rare; normally the container holds the node inactive between
                   missions).
 """
@@ -276,6 +277,9 @@ class ConeDetectionNode(BaseLifecycleNode):
                 )
             self._cone_strategy = strategy_cls(self.get_logger(), config=config)
             self._cone_strategy.configure()
+            # The LiDAR reader is created here, once, and kept across
+            # activations (see _ensure_lidar_sub).
+            self._ensure_lidar_sub()
             self._cpp_decode = None
             if config.detector_backend == "cpp":
                 try:  # the C++ decode comes with the cpp backend (~1 ms vs ~6 ms numpy)
@@ -293,23 +297,33 @@ class ConeDetectionNode(BaseLifecycleNode):
             self.get_logger().error(f"Failed to configure: {e}")
             return TransitionCallbackReturn.FAILURE
 
+    def _ensure_lidar_sub(self) -> None:
+        """Create the LiDAR subscription once; it lives until on_cleanup.
+
+        Activate/deactivate only flip ``_is_active`` (the callback returns
+        before decoding while inactive). Re-creating the reader on every
+        activation meant a new DDS reader per mission, and in HIL the remote
+        writer (sim bridge on Fast DDS, pipeline on Cyclone) sometimes never
+        matched it after an emergency: the run then got no scans at all and
+        the watchdog tripped on "/slam/pose never published".
+        """
+        if self._sub is None:
+            self._sub = self.create_subscription(
+                PointCloud2,
+                "/fsds/lidar/Lidar1",
+                self.listener_callback,
+                QOS_LATEST,
+            )
+
     def on_activate(self, state: State) -> TransitionCallbackReturn:
-        self._is_active = True
         self._reset_diag()
-        self._sub = self.create_subscription(
-            PointCloud2,
-            "/fsds/lidar/Lidar1",
-            self.listener_callback,
-            QOS_LATEST,
-        )
+        self._ensure_lidar_sub()
+        self._is_active = True
         self.get_logger().info(f"Activated in mode: {self._mode_name}")
         return super().on_activate(state)
 
     def on_deactivate(self, state: State) -> TransitionCallbackReturn:
-        self._is_active = False
-        if self._sub is not None:
-            self.destroy_subscription(self._sub)
-            self._sub = None
+        self._is_active = False  # the subscription stays; scans are ignored
         self.get_logger().info("Deactivated")
         return super().on_deactivate(state)
 
