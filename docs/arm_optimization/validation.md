@@ -501,14 +501,110 @@ detection every time. What differs in HIL is the DDS link: detection re-created 
 on every activation, and the sim bridge (Fast DDS) sometimes never matched the new reader. A
 later HIL session didn't reproduce it, so it's intermittent.
 
+**Correction:** the reader wasn't the cause. These were the reassembly stalls described in the
+next section: a second, independent reader on the Pi lost the same scans at the same times.
+Keeping one reader is still the safer lifecycle, so the change stays.
+
 The fix removes the step: detection creates its LiDAR subscription once at configure and keeps
 it until cleanup; activation only switches scan handling on and off, and an inactive node
 returns before decoding (`cone_detection/test/test_lidar_sub_lifetime.py`). The car-bag cycles
 still resume every time (203, 217, 236 detections per 25 s driving). Not yet confirmed in HIL.
 
+### LiDAR stalls: IP reassembly on the Pi
+
+The remaining watchdog trips ("/slam/pose silent 0.6 s" mid-run, "never published" after an
+emergency) were the Pi's kernel dropping LiDAR, not the pipeline. Since sim build 07b2b7e (LiDAR
+pitched down, 161k hits per scan) each scan is a 2.6 MB `PointCloud2`. Fast DDS sends it as
+about 40 UDP datagrams of 64 KB, which the IP layer splits into about 1,800 Ethernet frames.
+
+```mermaid
+flowchart LR
+    S["Sim box<br/>2.6 MB scan, 10 Hz"] -->|"~1,800 frames"| N["Pi NIC<br/>misses ~11 frames/s"]
+    N --> R["Kernel IP reassembly<br/>memory 4 MB, partials kept 30 s"]
+    R -->|"complete datagrams"| D["Cyclone → detection"]
+    R -.->|"memory full: every new<br/>fragment dropped"| X["No scans for 1–15 s<br/>→ watchdog trip"]
+```
+
+One missed frame leaves a partial datagram in reassembly memory for `ipfrag_time` (30 s). A few of
+those fill the 4 MB `ipfrag_high_thresh`, and the kernel drops every new fragment until they
+expire. That explains why the stalls lasted seconds, came in clusters, and why the next mission
+often got no scans at all. Before the fix the Pi had failed 8.97 M reassemblies against 3.36 M
+that succeeded; `UdpRcvbufErrors` was 0, so socket buffers were never the problem.
+
+How it was isolated, one `cpp` HIL session each: per-stage timing in detection (decode + detect
+1–10 ms even next to a stall), then a second raw LiDAR reader in its own process (lost the same
+scans), then the box bag (`/clock`, `/imu`, `/odom` kept 22–35 ms max gaps), the box CPU and GPU
+(not saturated), and the IFSSIM side (the sim and bridge send steadily). The Pi's counters
+settled it.
+
+The fix is two kernel settings on the HIL computer (`/etc/sysctl.d/60-dv-hil-dds.conf`,
+[DDS tuning](../DDS_TUNING.md)): `ipfrag_high_thresh` 64 MB (about 24 scans) and `ipfrag_time`
+3 s. The car doesn't need it: there the clouds stay on one computer and are never fragmented.
+
+| HIL sessions, same pipeline (388770d) | Missions finished (of 10) | Watchdog trips | Reassembly failures |
+|---|---|---|---|
+| Before: fused, then 4 cpp sessions | 5, 1, 1, 7, 1 | 4 to 9 per session | ~73 % since boot |
+| **After: fused** | **10** | **0** | 0.8 % |
+| **After: cpp** | **10** | **0** | 0.7 % |
+
+```mermaid
+xychart-beta
+    title "Missions finished per HIL session (budget: all 10)"
+    x-axis ["fused v4", "cpp v4", "cpp v5", "cpp v6", "cpp v7", "fused, fixed", "cpp, fixed"]
+    y-axis "missions finished" 0 --> 10
+    bar [5, 1, 1, 7, 1, 10, 10]
+    line [10, 10, 10, 10, 10, 10, 10]
+```
+
+### cpp backend in HIL
+
+With the stalls gone, the full check (acceleration, skidpad, 4 autocross, 4 × 10-lap
+trackdrive) ran once per backend. `cpp` matches `fused`, so it is the default now
+(`bringup/config/params.yaml`).
+
+| | fused | cpp |
+|---|---|---|
+| Missions finished | 10 / 10 | 10 / 10 |
+| Cones accepted per scan | 13.09 | 13.29 |
+| Detection rate (sim sends 10 Hz) | 9.67 Hz | 9.75 Hz |
+| Total lap time, all missions | 3,913 s | 3,899 s |
+| SLAM step p50 / p99 | 18.3 / 31.4 ms | 15.9 / 34.2 ms |
+| Detection CPU (core 4, % of one core) | 42.3 % | **33.7 %** |
+| SLAM CPU (core 5) | 71.2 % | 61.3 % |
+| Planning + control (core 6) | 99 % | 98 % |
+| Cones hit | 75 | 23 |
+
+Every mission's time is within 2 % except autocross 013726 (cpp 121.4 s against 95.4 s). The
+cone-hit difference comes from three fused trackdrives (10, 17 and 28 hits); with one session
+each, treat it as noise.
+
+CPU while driving, averaged over each session (the monitor samples every 0.5 s):
+
+```mermaid
+xychart-beta
+    title "A76 core load while driving, fused (first bar) vs cpp (%, budget 100)"
+    x-axis ["core 4 detection", "core 5 SLAM", "core 6 planning+control", "core 7 odometry+IRQ"]
+    y-axis "% of core" 0 --> 100
+    bar [43, 71, 99, 28]
+    bar [33, 60, 98, 26]
+    line [100, 100, 100, 100]
+```
+
+`cpp` frees about a fifth of detection's core. Core 6 is the one at its budget with either
+backend (Open item 2).
+
+```mermaid
+xychart-beta
+    title "Trackdrive best lap, fused vs cpp (s, lower is better)"
+    x-axis ["013721", "013723", "013725", "013726"]
+    y-axis "best lap (s)" 60 --> 110
+    bar [105.6, 70.4, 81.3, 87.5]
+    bar [105.8, 70.2, 80.8, 85.6]
+```
+
 ### Open
 
-1. **Scan drops cause the watchdog trips.** Every trip is `/slam/pose` silent for 0.62–0.63 s:
+1. ~~**Scan drops cause the watchdog trips.**~~ Fixed above (IP reassembly on the Pi). Every trip is `/slam/pose` silent for 0.62–0.63 s:
    6 scans in a row missing. The Pi's network card misses frames when a 1.5 MB scan arrives as one
    burst (`rx_mac_missed` +46 k frames over the performance run). Its 1024-frame ring is at the
    maximum and the driver can't coalesce interrupts. LiDAR is best effort, so one lost frame loses

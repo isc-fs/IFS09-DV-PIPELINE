@@ -157,4 +157,6 @@ cone_detection_node:
     template_early_exit_height_small_m: 0.4
     template_early_exit_height_big_m: 0.5
     fit_backend: template_dispatch
-    detector_backend: fused
+    # cpp: C++ decode + detect (perception_cpp/cone_detection_core). Falls back to fused,
+    # with a warning, if the core isn't built. HIL check: docs/arm_optimization/validation.md.
+    detector_backend: cpp

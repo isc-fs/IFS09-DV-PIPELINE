@@ -49,10 +49,24 @@ Two deliberate differences from the ROS 2 guide:
 - **32 MB ceiling instead of the guide's 2,147,483,647.** The ceiling only needs to exceed the
   10 MB request; a lower one stops other programs from reserving huge buffers.
 
-Not applied: the guide's `ipfrag_time` / `ipfrag_high_thresh` settings. They matter for IP
-fragmentation on links with a small MTU. The clouds travel between processes on the same
-computer, where that does not happen. Revisit if a DDS subscriber on another machine (not
-Foxglove, which uses a websocket) shows losses.
+Not applied on the car: the guide's `ipfrag_time` / `ipfrag_high_thresh` settings. The clouds
+travel between processes on the same computer, where IP fragmentation does not happen.
+
+They are needed on any computer that receives clouds over the network. Seen in HIL (sim box →
+Orange Pi 5 Plus over 1 GbE): each 2.6 MB scan arrives as about 1,800 Ethernet frames, and a
+single lost frame leaves a partial scan in the kernel's reassembly memory for `ipfrag_time`
+(30 s). With the default 4 MB `ipfrag_high_thresh`, a few partial scans fill it and the kernel
+drops every new fragment until they expire. Detection then gets no scans for 1–15 s and the
+watchdog trips. On the Pi, `IpReasmFails` was 8.97 M against 3.36 M `IpReasmOKs`; socket
+buffers were not the problem (`UdpRcvbufErrors` 0). The HIL computer gets:
+
+```
+net.ipv4.ipfrag_high_thresh = 67108864   # ~24 scans in flight
+net.ipv4.ipfrag_low_thresh  = 50331648
+net.ipv4.ipfrag_time        = 3          # a partial scan is useless after 100 ms
+```
+
+Check with `nstat -az | grep -E 'IpReasm(Fails|OKs)|UdpRcvbufErrors'` before and after a run.
 
 ## Measurements (Docker on the development Mac, not the DVPC)
 

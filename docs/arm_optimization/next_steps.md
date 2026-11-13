@@ -22,21 +22,23 @@ it's safe on the car, then to buy margin.
    - the LiDAR driver's load: it floats on the A55 cores 0-3 and was never measured on the Pi;
    - `rx_mac_missed` on the LiDAR's network card stays flat;
    - temperature on a hot day: every core at full clock, throttling starts at 75 °C.
-4. **HIL scan drops.** Pace the sim box's LiDAR sender so a scan doesn't reach the Pi as one
-   1.5 MB burst; until then a watchdog trip now and then is the LAN, not the pipeline.
+4. ~~**HIL scan drops.**~~ Fixed by IP reassembly settings on the Pi, no sender pacing needed
+   ([validation](validation.md#lidar-stalls-ip-reassembly-on-the-pi)).
 
 ## Sprint 2: C++ core
 
 **Part 1 done: the kernels.** `perception_cpp/cone_detection_core`, behind
-`detector_backend: cpp` (fused stays the default). It passes the golden test, and on the
+`detector_backend: cpp`, the default since the HIL check. It passes the golden test, and on the
 RK3588 under load decode + detect went from 21.2 / 40.3 ms to **12.2 / 24.6 ms** p50 / p99
 ([detection, section 7](detection.md#7-c-core-detector_backend-cpp)). Most of the gain is
 the C++ decode (7.3 → 0.5 ms).
 
 **Next (this sprint):**
 
-1. **Car and HIL check with `detector_backend: cpp`.** Run the HIL full check, then compare
-   the bring-up log and cone counts against fused. If they match, make `cpp` the default.
+1. ~~**HIL check with `detector_backend: cpp`.**~~ Done: 10 / 10 missions on both backends,
+   same cones per scan and lap times, so `cpp` is the default
+   ([validation](validation.md#cpp-backend-in-hil)). Still to do on the car: compare the
+   bring-up log and cone counts against fused.
 2. **The rclcpp component** (backlog item 1 below): it moves the scan off DDS and Python.
    About 6 ms per scan is left there now (deserialise 1.9–4 ms, plus marker build).
 
