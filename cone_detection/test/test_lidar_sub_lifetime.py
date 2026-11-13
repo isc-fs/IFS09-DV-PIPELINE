@@ -6,7 +6,8 @@ reader after an emergency, so the next run got no scans and the watchdog tripped
 "/slam/pose never published". The contract pinned here:
   * configure creates the reader; activate/deactivate never create or destroy it;
   * an inactive node ignores scans before decoding them;
-  * cleanup destroys it, and a later configure creates a fresh one.
+  * cleanup keeps it too: destroying it while scans arrived hung the MultiThreadedExecutor,
+    and the node then answered no service (seen on the acceleration -> skidpad switch).
 """
 from __future__ import annotations
 
@@ -82,12 +83,26 @@ def test_inactive_node_ignores_scans_before_decoding(node, monkeypatch):
     node.listener_callback(object())  # inactive: returns early, no decode
 
 
-def test_cleanup_drops_the_reader_and_configure_makes_a_new_one(node):
+def test_mission_switch_keeps_the_reader(node):
+    """acceleration -> skidpad: deactivate, cleanup, configure, activate. One reader throughout."""
     node._ensure_lidar_sub()
     first = node._sub
     node.on_activate(None)
     node.on_deactivate(None)
     node.on_cleanup(None)
-    assert node.destroyed == [first] and node._sub is None
+    assert node.destroyed == [] and node._sub is first
+    node._ensure_lidar_sub()  # the next on_configure
+    node.on_activate(None)
+    assert len(node.created) == 1 and node._sub is first
+
+
+def test_unconfigured_node_ignores_scans(node, monkeypatch):
+    """After cleanup the strategy is gone but scans still arrive: they must be dropped."""
+    def boom(*_a, **_k):
+        raise AssertionError("decoded a scan while unconfigured")
+
+    monkeypatch.setattr(cdn.ConeDetectionNode, "pointcloud2_to_xyz", staticmethod(boom))
     node._ensure_lidar_sub()
-    assert len(node.created) == 2 and node._sub is not first
+    node._is_active = True  # even if active were left set, no strategy means no work
+    node._cone_strategy = None
+    node.listener_callback(object())

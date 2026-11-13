@@ -34,8 +34,9 @@ Lifecycle layout (driven by mode_manager → change_state):
                   ``super().on_activate()`` flips publishers to emitting state.
   on_deactivate   stop handling scans (the callback returns before decoding).
                   The LiDAR subscription stays: one DDS reader for the node's
-                  life, so a remote writer never has to re-match it per mission.
-  on_cleanup      destroy LiDAR subscription, publishers and strategy. Re-configuring re-runs warmup
+                  life, never destroyed while scans arrive.
+  on_cleanup      destroy publishers and strategy (the LiDAR subscription stays).
+                  Re-configuring re-runs warmup
                   (rare; normally the container holds the node inactive between
                   missions).
 """
@@ -298,14 +299,19 @@ class ConeDetectionNode(BaseLifecycleNode):
             return TransitionCallbackReturn.FAILURE
 
     def _ensure_lidar_sub(self) -> None:
-        """Create the LiDAR subscription once; it lives until on_cleanup.
+        """Create the LiDAR subscription once; it lives as long as the node.
 
-        Activate/deactivate only flip ``_is_active`` (the callback returns
-        before decoding while inactive). Re-creating the reader on every
-        activation meant a new DDS reader per mission, and in HIL the remote
-        writer (sim bridge on Fast DDS, pipeline on Cyclone) sometimes never
-        matched it after an emergency: the run then got no scans at all and
-        the watchdog tripped on "/slam/pose never published".
+        Activate/deactivate/cleanup never touch it: the callback returns
+        before decoding while the node is inactive or unconfigured.
+
+        * Re-creating the reader on every activation meant a new DDS reader
+          per mission, and in HIL the remote writer (sim bridge on Fast DDS,
+          pipeline on Cyclone) sometimes never matched it after an
+          emergency: the run got no scans and the watchdog tripped on
+          "/slam/pose never published".
+        * Destroying it in on_cleanup while scans were arriving hung the
+          MultiThreadedExecutor for good (rclpy Humble): the node answered
+          no service after the acceleration -> skidpad switch.
         """
         if self._sub is None:
             self._sub = self.create_subscription(
@@ -328,9 +334,7 @@ class ConeDetectionNode(BaseLifecycleNode):
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
-        if self._sub is not None:
-            self.destroy_subscription(self._sub)
-            self._sub = None
+        # The LiDAR subscription is NOT destroyed here (see _ensure_lidar_sub).
         for attr in (
             "_pub_markers",
             "_pub_orange",
