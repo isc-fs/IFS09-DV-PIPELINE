@@ -1,0 +1,19 @@
+# dv-rk3588-tuning.service — CPU and interrupt tuning for the RK3588 car computer.
+# Applies deploy/rk3588_tuning.sh at every boot (idempotent, a few ms). Installed and
+# enabled by `sudo deploy/rk3588_tuning.sh install`; undone by `... rollback`.
+[Unit]
+Description=DV RK3588 tuning (performance governor, NIC interrupts on core 7)
+# After the board's cpufrequtils, which sets its default governor on every core at boot
+# (and would undo ours), and after the network is up: a card's interrupts only exist
+# once its interface is open. The dv-* drop-ins re-apply before the pipeline starts too.
+After=cpufrequtils.service network-online.target
+Wants=network-online.target
+Before=dv-pipeline.service dv-manual.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/rk3588_tuning.sh apply
+
+[Install]
+WantedBy=multi-user.target

@@ -14,6 +14,58 @@ status. Backups made by the installers live in `~isc/.isc_backups/`.
 
 ---
 
+## 2026-11-13 · RK3588 CPU and interrupt tuning
+
+**Status:** installed (2026-11-13) on the Orange Pi 5 Plus test board (192.168.0.128), which
+runs the HIL check. Not on a car yet. The dv-* drop-ins are in place but inert there: that
+board has no dv-pipeline unit.
+
+**Why:** measured in the HIL full check
+([validation, level 5](../docs/arm_optimization/validation.md#5-hardware-in-the-loop-the-full-sim-check-on-the-orange-pi)).
+`ondemand` drops the cores to 408 MHz between scans; on the A76s `performance` took detection p99
+from 9.6 to 5.9 ms and scan → cones p99 from 171 to 120 ms, with no extra heat. The network
+card's interrupts all landed on core 4, the detector's. The A55s stay on the board governor
+with the management nodes unpinned: a HIL A/B with them on `performance` and one node per A55
+lost more scans (0.89 vs 0.62 gaps over 0.25 s per minute, tripped after 3 laps vs 8).
+
+**Changes on the box:**
+
+| Path | Before | After |
+|---|---|---|
+| Governor, A76 cores 4-7 (cpufreq policy4, policy6) | `ondemand` (board's `/etc/default/cpufrequtils`) | `performance`; A55 cores 0-3 (policy0) unchanged |
+| Wired network card interrupts | any core (0-7), in practice core 4 | core 7 |
+| Network card receive ring | already at its maximum (1024) on the Orange Pi | maximum |
+| irqbalance | absent on the Orange Pi image | disabled and masked, if present |
+| `/usr/local/bin/rk3588_tuning.sh` | absent | the tuning (`apply`, `status`, `install`, `rollback`) |
+| `/etc/systemd/system/dv-rk3588-tuning.service` | absent | runs `apply` at boot, after cpufrequtils and the network |
+| `/etc/dv/rk3588.env` | absent | `DV_CPU_PIN` (one A76 core per per-scan process) and one-thread numeric libraries |
+| `/etc/systemd/system/dv-{pipeline,manual}.service.d/60-rk3588.conf` | absent | launch on cores 0-3, load `rk3588.env`, re-run `apply` before start |
+
+Core pinning moves from a script that pinned running processes to the launch: with
+`DV_CPU_PIN` set, `bringup` starts each listed node under `taskset -c <core>`. Unset (the
+DVPC, the sim CI, laptops) nothing changes. Layout:
+
+| Core | Runs |
+|---|---|
+| 0-3 (A55) | unpinned: mode manager, mission control, watchdog, sim supervisor, LiDAR driver, recorder, the launch, the OS |
+| 4 (A76) | cone detection |
+| 5 (A76) | SLAM |
+| 6 (A76) | path planning, control |
+| 7 (A76) | odometry filter, network interrupts |
+
+Unlisted processes float on cores 0-3.
+
+**Install:** `sudo deploy/rk3588_tuning.sh install` (records the current state, applies now,
+enables at boot). Restart the pipeline to pick up the pinning.
+
+**Check:** `rk3588_tuning.sh status`: policy4 and policy6 on `performance`, every network
+interrupt on 7. Verified across two reboots on the test board.
+
+**Undo:** `sudo rk3588_tuning.sh rollback`: governors and irqbalance as recorded, network
+interrupts back to any core, files and drop-ins removed.
+
+---
+
 ## 2026-11-01 · Cyclone DDS large-message tuning (issue #21)
 
 **Status:** in repo, branch `fix/21-cyclone-large-messages`. **Not installed**: the DVPC

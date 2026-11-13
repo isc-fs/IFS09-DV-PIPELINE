@@ -47,10 +47,15 @@ Public API used by the launch files:
   node_parameters(...)   The `parameters=` every node gets: use_sim_time
                          plus bringup/config/params.yaml, the nodes'
                          default parameters (see that file's header).
+
+  cpu_pin_prefix(...)    `taskset -c <cpus>` for a pipeline node, from the
+                         DV_CPU_PIN environment variable. Unset (the
+                         default everywhere but the RK3588) = no pinning.
 """
 from __future__ import annotations
 
 import os
+import re
 from typing import Iterable
 
 from launch.actions import EmitEvent, RegisterEventHandler
@@ -151,6 +156,7 @@ def auto_active(
         output="screen",
         remappings=list(remappings or []),
         parameters=node_parameters(parameters),
+        **_pin(name),
     )
     configure = EmitEvent(event=ChangeState(
         lifecycle_node_matcher=matches_action(node),
@@ -166,6 +172,48 @@ def auto_active(
         ))],
     ))
     return [node, activate, configure]
+
+
+_CPUS = re.compile(r"^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$")
+
+
+def parse_cpu_pin(spec: str | None) -> dict[str, str]:
+    """Parse DV_CPU_PIN: whitespace-separated `node_name=cpus` entries.
+
+    `cpus` is a taskset CPU list ("4", "0-3", "6,7"). Example (the RK3588
+    layout, deploy/rk3588.env):
+        cone_detection_node=4 slam_node=5 path_planning_node=6 control_node=6
+        odometry_filter_node=7
+    A malformed entry raises: a typo must stop the launch, not silently
+    leave the detector sharing a core.
+    """
+    out: dict[str, str] = {}
+    for entry in (spec or "").split():
+        name, sep, cpus = entry.partition("=")
+        if not sep or not name or not _CPUS.match(cpus):
+            raise ValueError(f"DV_CPU_PIN: bad entry {entry!r}, expected node_name=cpus")
+        out[name] = cpus
+    return out
+
+
+def cpu_pin_prefix(name: str, env: dict | None = None) -> str | None:
+    """`taskset -c <cpus>` for the node `name`, or None when it isn't pinned.
+
+    Applies to the autonomy nodes, the management trio and the watchdog.
+
+    The prefix pins the process from its first instruction, so every thread
+    it starts (DDS, executors, Numba) inherits the core. Nodes not listed
+    keep the affinity of the launch process (the RK3588 unit starts the
+    launch on the A55 cores 0-3).
+    """
+    pins = parse_cpu_pin((os.environ if env is None else env).get("DV_CPU_PIN"))
+    return f"taskset -c {pins[name]}" if name in pins else None
+
+
+def _pin(name: str) -> dict:
+    """`prefix=` kwargs for a node listed in DV_CPU_PIN, else {}."""
+    prefix = cpu_pin_prefix(name)
+    return {"prefix": prefix} if prefix else {}
 
 
 def autonomy_lifecycle(
@@ -188,6 +236,7 @@ def autonomy_lifecycle(
         output="screen",
         remappings=list(remappings or []),
         parameters=node_parameters(),
+        **_pin(name),
     )
 
 
@@ -265,6 +314,7 @@ def watchdog_action() -> list:
         namespace="",
         output="screen",
         parameters=node_parameters(),
+        **_pin("pipeline_watchdog_node"),
     )]
 
 

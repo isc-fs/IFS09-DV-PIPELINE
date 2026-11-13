@@ -14,11 +14,14 @@ it's safe on the car, then to buy margin.
    to the backlog.
 2. ~~Refreeze the golden fixtures.~~ Done: `test_golden.py`, 30 real scans frozen at dc5296d
    ([validation](validation.md#12-equivalence)).
-3. **Car test** on the Orange Pi, with the thread caps and pinning in the systemd unit and
-   the baked cache. Check the bring-up log says `cache warm`. Add two board settings measured in
-   the [HIL full check](validation.md#5-hardware-in-the-loop-the-full-sim-check-on-the-orange-pi):
-   - the `performance` governor on the A76 cores (detection p99 9.6 → 5.9 ms, at no extra heat);
-   - the network interrupts off core 4, the detection core (for example on core 7).
+3. **Car test** on the Orange Pi, with the baked cache; check the bring-up log says `cache warm`.
+   The board settings are one installer now, `sudo deploy/rk3588_tuning.sh install`
+   ([changelog](../../deploy/CHANGELOG.md)): the A76 cores on `performance`, network interrupts on
+   core 7, one A76 core per per-scan process through `DV_CPU_PIN`, everything else floating on
+   the A55 cores. On the car, also check:
+   - the LiDAR driver's load: it floats on the A55 cores 0-3 and was never measured on the Pi;
+   - `rx_mac_missed` on the LiDAR's network card stays flat;
+   - temperature on a hot day: every core at full clock, throttling starts at 75 °C.
 4. **HIL scan drops.** Pace the sim box's LiDAR sender so a scan doesn't reach the Pi as one
    1.5 MB burst; until then a watchdog trip now and then is the LAN, not the pipeline.
 
@@ -59,8 +62,9 @@ flowchart LR
 4. SLAM: vectorise data association and read estimates incrementally. Not needed for budget
    today.
 5. Planning in C++: not needed.
-6. Cores 5 and 6 sit at about 96–99 % while SLAM computes about 15 ms per scan: cut the publishing
-   overhead around the algorithms (about 14 ms per scan building SLAM's marker arrays).
+6. Core 6 (planning + control) sits at about 99 %. Profile it on the car bag the way SLAM was
+   ([validation](validation.md#slams-core-stop-waking-for-inputs-it-drops)); SLAM's core went
+   from 72 to 30 % once it stopped waking for inputs it drops.
 7. C++ clustering: a hash grid instead of the sorted-key search. Clustering is 6.4 ms of
    the 11.7 ms cpp detect. Do it after SW-02b, which shrinks its input. Also make crop
    skip the zero-fill (0.25 ms).
