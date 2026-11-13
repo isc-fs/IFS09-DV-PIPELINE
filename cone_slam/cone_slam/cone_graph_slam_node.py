@@ -337,6 +337,16 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # only; a viewer that misses the initial spawn never recovers).
         self.declare_parameter("cone_map_full_publish_every_n_scans", 50)
 
+        # DELTA interval (in scans) for /Conos_full. The deltas accumulate
+        # against the last published position, so sending every Nth scan
+        # loses nothing: it batches the changes. /Conos_full is for viewers
+        # only (nothing in the pipeline subscribes), and 2 Hz is plenty for
+        # a map view, while building it every scan cost several ms of the
+        # SLAM core on the RK3588. 1 = every scan (the old behaviour). It is
+        # also skipped while nobody subscribes; the first publish after a
+        # subscriber appears is a keyframe.
+        self.declare_parameter("cone_map_full_delta_every_n_scans", 5)
+
         # Cascade-skip recovery. After this many consecutive scans
         # rejected by the cascade-spike gate, force-accept the next
         # scan instead of skipping it. The theory: 10 scans in a row
@@ -568,6 +578,9 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._state = State.INIT_WAITING_IMU
         self._calib_started_t = None
         self._latest_result = None
+        # Reused Marker per landmark id (see _cone_marker).
+        self._marker_cache = {}
+        self._full_had_subs = False
         self._preint = ImuPreintegrator()
         self._graph = FactorGraph()
         self._db = LandmarkDb()
@@ -846,9 +859,13 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # consumed inside the scan callback. Drives the kinematic-bicycle
         # BetweenFactor (ω = (vx/L)·tan(δ)) which constrains yaw rate
         # during cone-poor windows, including cascade-spike skips.
-        self._sub_steering = self.create_subscription(
-            Float32, "/steering_angle", self._on_steering, rpm_qos
-        )
+        # Only the imu motion model reads it (the steering factor); with
+        # motion_model=odom the EKF fuses steering, so SLAM would wake for
+        # 100 messages/s on the car and drop every one.
+        if self._motion_model == "imu":
+            self._sub_steering = self.create_subscription(
+                Float32, "/steering_angle", self._on_steering, rpm_qos
+            )
 
         # /testing_only/odom — sim ground truth, used only for the
         # GT-aligned diagnostic. The bridge encodes this in ENU
@@ -1244,9 +1261,33 @@ class ConeGraphSlamNode(BaseLifecycleNode):
 
     # ----- Cone observation callback (scan trigger) -------------------------
 
+    def _drop_init_only_subs(self) -> None:
+        """With motion_model=odom, /imu and /motor_rpm only serve the INIT
+        bias calibration (the stationary check reads the RPM). Once SLAM
+        runs, every message is decoded and dropped: 500 wake-ups/s of the
+        single-threaded executor on the car (IMU 400 Hz, RPM 100 Hz), which
+        the RK3588 profile showed as most of the SLAM core outside the scan
+        work. Called from the scan callback, never from their own callbacks.
+        on_activate creates them again for the next run."""
+        if self._motion_model != "odom" or self._state != State.SLAM_RUNNING:
+            return
+        dropped = []
+        for attr, topic in (("_sub_imu", "/imu"), ("_sub_rpm", "/motor_rpm")):
+            sub = getattr(self, attr)
+            if sub is not None:
+                self.destroy_subscription(sub)
+                setattr(self, attr, None)
+                dropped.append(topic)
+        if dropped:
+            self.get_logger().info(
+                f"calibrated, motion_model=odom: unsubscribed {' and '.join(dropped)} "
+                "until the next activate"
+            )
+
     def _on_cones(self, msg: MarkerArray) -> None:
         if self._state != State.SLAM_RUNNING:
             return
+        self._drop_init_only_subs()
         if self._latest_result is None:
             return
 
@@ -2219,6 +2260,14 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             self._publish_f32(self._pub_commit_ms, commit)
         self._publish_f32(self._pub_n_obs, float(n_obs))
 
+    @staticmethod
+    def _has_subscribers(pub) -> bool:
+        """True when `pub` has a subscriber, or can't tell (test stubs)."""
+        if pub is None:
+            return False
+        getter = getattr(pub, "get_subscription_count", None)
+        return True if getter is None else getter() > 0
+
     def _publish_f32(self, pub, value: float) -> None:
         if pub is None:
             return
@@ -2630,7 +2679,19 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # or fire on every scan for the rest of the run.
         scan_idx = self._graph.step + self._loc_scan
         keyframe = keyframe_every > 0 and (scan_idx % keyframe_every == 0)
-        self._publish_full_cone_map(stamp, min_obs, keyframe=keyframe)
+        delta_every = max(1, int(
+            self.get_parameter("cone_map_full_delta_every_n_scans").value))
+        # Nobody listening (no viewer, no recorder): skip the build, and
+        # resync with a keyframe as soon as someone subscribes.
+        has_subs = self._has_subscribers(self._cones_full_pub)
+        if not has_subs:
+            self._full_had_subs = False
+            return
+        if not self._full_had_subs:
+            self._full_had_subs = True
+            keyframe = True
+        if keyframe or scan_idx % delta_every == 0:
+            self._publish_full_cone_map(stamp, min_obs, keyframe=keyframe)
 
         # Periodic diagnostic — every ~5 s of /Conos publishes,
         # surface the filter stats so the operator can confirm the
@@ -2646,26 +2707,37 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             )
 
     def _cone_marker(self, lm, stamp) -> Marker:
-        """Build one CYLINDER marker for a landmark. marker.id encodes the
+        """One CYLINDER marker for a landmark. marker.id encodes the
         persistent SLAM landmark id so consumers can track identity across
-        scans. Single neutral yellow — SLAM has no per-cone colour."""
-        m = Marker()
+        scans. Single neutral yellow — SLAM has no per-cone colour.
+
+        The Marker is built once per landmark and reused: only the stamp
+        and the position change between scans. Constructing a
+        visualization_msgs/Marker in rclpy sets ~20 nested fields through
+        checked setters, and /Conos needs one per nearby cone every scan.
+        Safe to share between /Conos and /Conos_full: publish() serializes
+        synchronously, and both carry the same stamp and position."""
+        m = self._marker_cache.get(lm.id)
+        if m is None:
+            m = Marker()
+            m.header.frame_id = self.map_frame
+            m.id = lm.id
+            m.type = Marker.CYLINDER
+            m.action = Marker.ADD
+            m.pose.orientation.w = 1.0
+            m.scale.x = 0.2
+            m.scale.y = 0.2
+            m.scale.z = 0.3
+            m.color.r = 1.0
+            m.color.g = 1.0
+            m.color.b = 0.0
+            m.color.a = 1.0
+            self._marker_cache[lm.id] = m
         m.header.stamp = stamp
-        m.header.frame_id = self.map_frame
-        m.id = lm.id
-        m.type = Marker.CYLINDER
-        m.action = Marker.ADD
-        m.pose.position.x = float(lm.position[0])
-        m.pose.position.y = float(lm.position[1])
-        m.pose.position.z = float(lm.position[2])
-        m.pose.orientation.w = 1.0
-        m.scale.x = 0.2
-        m.scale.y = 0.2
-        m.scale.z = 0.3
-        m.color.r = 1.0
-        m.color.g = 1.0
-        m.color.b = 0.0
-        m.color.a = 1.0
+        p = m.pose.position
+        p.x = float(lm.position[0])
+        p.y = float(lm.position[1])
+        p.z = float(lm.position[2])
         return m
 
     def _publish_full_cone_map(
