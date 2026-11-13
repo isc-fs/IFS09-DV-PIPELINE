@@ -276,6 +276,14 @@ class ConeDetectionNode(BaseLifecycleNode):
                 )
             self._cone_strategy = strategy_cls(self.get_logger(), config=config)
             self._cone_strategy.configure()
+            self._cpp_decode = None
+            if config.detector_backend == "cpp":
+                try:  # the C++ decode comes with the cpp backend (~1 ms vs ~6 ms numpy)
+                    from cone_detection_core import decode_xyz  # noqa: PLC0415
+
+                    self._cpp_decode = decode_xyz
+                except ImportError:
+                    pass  # the detector already warned and runs fused
             self.get_logger().info(
                 f"Cone detection pipeline ready | mode: {self._mode_name} | "
                 f"behavior: {self._behavior}"
@@ -342,7 +350,7 @@ class ConeDetectionNode(BaseLifecycleNode):
     # Per-scan callback
     # ------------------------------------------------------------------
     @staticmethod
-    def pointcloud2_to_xyz(msg: PointCloud2) -> np.ndarray:
+    def pointcloud2_to_xyz(msg: PointCloud2, cpp_decode=None) -> np.ndarray:
         """Decode PointCloud2 to ``(N, 3)`` float32 (x, y, z).
 
         Reads x/y/z by their declared byte offsets over a ``point_step`` stride,
@@ -357,6 +365,11 @@ class ConeDetectionNode(BaseLifecycleNode):
         view handles packed-26, aligned-32, and the sim layouts alike.
         """
         num_points = msg.width * msg.height
+        if cpp_decode is not None:  # cone_detection_core.decode_xyz: same layout rules
+            off = {f.name: f.offset for f in msg.fields}
+            return cpp_decode(
+                msg.data, num_points, msg.point_step, off["x"], off["y"], off["z"]
+            )
         raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             num_points, msg.point_step
         )
@@ -382,7 +395,7 @@ class ConeDetectionNode(BaseLifecycleNode):
         if self._pub_markers is None or self._pub_orange is None:
             return
 
-        point_cloud = self.pointcloud2_to_xyz(msg)
+        point_cloud = self.pointcloud2_to_xyz(msg, getattr(self, "_cpp_decode", None))
         want_ground = _has_subs(self._pub_ground)
         t0 = time.perf_counter()
         result = self._cone_strategy.detect_cones(

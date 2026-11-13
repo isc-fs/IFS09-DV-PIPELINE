@@ -42,7 +42,7 @@ from cone_detection.cone_fit import (
     cone_fit_template_dispatch,
 )
 from cone_detection.clustering import _warn_once, fast_dbscan
-from cone_detection import fused
+from cone_detection import cpp_backend, fused
 from cone_detection.ground_methods import remove_ground
 from cone_detection.ransac import scan_seed, seed_numba_rng
 from cone_detection.rotations import vectors2matrix
@@ -385,7 +385,7 @@ def clustering_separation_rt(
 class RealtimeConeDetector:
     """Configurable single-scan cone detector (see :class:`ConeDetectionConfig`)."""
 
-    __slots__ = ("config", "_prev_plane", "last_rotated_xyz", "last_outlier_xyz")
+    __slots__ = ("config", "_prev_plane", "last_rotated_xyz", "last_outlier_xyz", "_cpp_core")
 
     def __init__(self, config: ConeDetectionConfig | None = None) -> None:
         self.config = config or ConeDetectionConfig()
@@ -393,6 +393,8 @@ class RealtimeConeDetector:
         # the plane barely moves frame to frame, so the warm candidate
         # usually wins immediately and collapses the iteration budget.
         self._prev_plane: np.ndarray | None = None
+        # C++ core of detector_backend="cpp" (and its RNG state), made on first use.
+        self._cpp_core = None
         # Last scan's cropped cloud after the same RANSAC rotation used
         # for clustering, ground shifted to z=0. Only filled when
         # ``viz_full_cloud=True`` (the /lidar_points/ground path).
@@ -418,23 +420,39 @@ class RealtimeConeDetector:
         self.last_outlier_xyz = empty
         if len(data) == 0:
             return []
-        if cfg.ransac_seed_per_scan:
-            seed_numba_rng(scan_seed(data))
-        if cfg.detector_backend == "fused":
-            reason = fused.fused_unsupported_reason(cfg, data, clustering_class)
-            if reason is None:
-                return self._detect_fused(
-                    data,
-                    debug_counters=debug_counters,
-                    compare_logger=compare_logger,
-                    clustering_class=clustering_class,
-                    stage_timings=stage_timings,
-                    ransac_iter_subsample_max=ransac_iter_subsample_max,
-                    viz_full_cloud=viz_full_cloud,
-                )
+        backend = cfg.detector_backend
+        if backend == "cpp" and not cpp_backend.available():
             _warn_once(
-                "fused:" + reason.split(" ")[0],
-                f"detector_backend=fused does not support {reason}; using the python path",
+                "cpp:import",
+                f"detector_backend=cpp: {cpp_backend.unavailable_reason()}; using fused",
+            )
+            backend = "fused"
+        reason = None
+        if backend in ("fused", "cpp"):
+            reason = fused.fused_unsupported_reason(cfg, data, clustering_class)
+            if reason is not None:
+                _warn_once(
+                    f"{backend}:" + reason.split(" ")[0],
+                    f"detector_backend={backend} does not support {reason}; using the python path",
+                )
+                backend = "python"
+        if backend == "cpp" and self._cpp_core is None:
+            self._cpp_core = cpp_backend.new_core()
+        if cfg.ransac_seed_per_scan:
+            if backend == "cpp":
+                self._cpp_core.seed(scan_seed(data))
+            else:
+                seed_numba_rng(scan_seed(data))
+        if backend in ("fused", "cpp"):
+            return self._detect_fused(
+                data,
+                debug_counters=debug_counters,
+                compare_logger=compare_logger,
+                clustering_class=clustering_class,
+                stage_timings=stage_timings,
+                ransac_iter_subsample_max=ransac_iter_subsample_max,
+                viz_full_cloud=viz_full_cloud,
+                cpp=backend == "cpp",
             )
         # Range pre-crop: drop far points before the O(n) RANSAC + DBSCAN
         # instead of clustering ~1000 far groups just to discard them by the
@@ -609,8 +627,10 @@ class RealtimeConeDetector:
         stage_timings,
         ransac_iter_subsample_max,
         viz_full_cloud,
+        cpp=False,
     ) -> list[tuple[float, float, float, float]]:
-        """``detect`` on the fused Numba backend (see ``cone_detection.fused``).
+        """``detect`` on the fused Numba backend (see ``cone_detection.fused``), or
+        on its C++ port when ``cpp`` (see ``cone_detection.cpp_backend``).
 
         Fills the same outputs as the Python path: cones, ``debug_counters``,
         ``stage_timings``, ``last_outlier_xyz``, ``last_rotated_xyz`` and the
@@ -618,15 +638,19 @@ class RealtimeConeDetector:
         """
         cfg = self.config
         st = stage_timings if stage_timings is not None else {}
-        scan = fused.run_scan(
-            data,
-            cfg,
+        common = dict(
             initial_plane=self._prev_plane,
             ransac_iter_subsample_max=ransac_iter_subsample_max,
             clustering_class=clustering_class,
             fast_clustering=clustering_class is DBSCAN,
             stage_timings=st,
         )
+        if cpp:
+            scan = cpp_backend.run_scan(
+                self._cpp_core, data, cfg, keep_cropped=viz_full_cloud, **common
+            )
+        else:
+            scan = fused.run_scan(data, cfg, **common)
         if len(scan.cropped) == 0:
             return []
         if debug_counters is not None:

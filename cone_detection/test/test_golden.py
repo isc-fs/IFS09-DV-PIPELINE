@@ -29,8 +29,13 @@ def scans():
     return golden.load_scans()
 
 
-@pytest.mark.parametrize("backend", ["python", "fused"])
+@pytest.mark.parametrize("backend", ["python", "fused", "cpp"])
 def test_matches_golden(backend, scans, reference):
+    if backend == "cpp":
+        from cone_detection import cpp_backend
+
+        if not cpp_backend.available():
+            pytest.skip(cpp_backend.unavailable_reason())
     out = golden.run(golden.production_config(backend), scans)
     assert len(out) == len(reference)
     for k, (got, ref) in enumerate(zip(out, reference)):

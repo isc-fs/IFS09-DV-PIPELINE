@@ -173,4 +173,7 @@ class ConeDetectionConfig:
     # * flat_cell_filter off;
     # * an (N, 3) float cloud.
     # Any other config falls back to "python" and logs one warning.
+    # * "cpp": the fused kernels ported 1:1 to C++ (perception_cpp/cone_detection_core,
+    #   pybind11; cone_detection/cpp_backend.py). Same output as "fused", same
+    #   limits; falls back to "fused" with one warning when the module is not built.
     detector_backend: str = "fused"

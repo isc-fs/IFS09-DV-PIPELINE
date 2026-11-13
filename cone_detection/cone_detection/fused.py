@@ -675,12 +675,14 @@ def run_scan(
     dt = data.dtype.type
     crop2 = dt(cfg.input_range_crop_m**2) if cfg.input_range_crop_m > 0 else dt(0)
     min2 = dt(cfg.input_min_range_m**2) if cfg.input_min_range_m > 0 else dt(0)
+    tc = time.perf_counter()
     pts = crop_promote(np.ascontiguousarray(data), crop2, min2)
     out.cropped = pts
+    t0 = time.perf_counter()
+    st["crop_ms"] = (t0 - tc) * 1000.0
     if len(pts) == 0:
         return out
 
-    t0 = time.perf_counter()
     if len(pts) < 3:  # remove_ground: no plane to fit, everything is an outlier
         outl = np.ones(len(pts), dtype=np.bool_)
         coefs = _DEFAULT_PLANE.copy()
@@ -729,7 +731,9 @@ def run_scan(
             return out
 
     n_before = len(sel)
+    tg = time.perf_counter()
     sel = bound_cluster_input(sel, cfg)
+    st["guard_ms"] = (time.perf_counter() - tg) * 1000.0
     out.guard_dropped = n_before - len(sel)
     st["n_dbscan_guard_dropped"] = float(out.guard_dropped)
     out.clean = sel

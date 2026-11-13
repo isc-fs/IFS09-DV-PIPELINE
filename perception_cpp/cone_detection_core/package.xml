@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cone_detection_core</name>
+  <version>0.1.0</version>
+  <description>C++ port of the fused cone-detection kernels (decode, RANSAC ground removal, tall-column veto, grid clustering, cone fit), exposed to Python with pybind11 as detector_backend: cpp.</description>
+  <maintainer email="jaimeperezgil21@gmail.com">jaime</maintainer>
+  <license>GPL-3.0-or-later</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+  <build_depend>pybind11-dev</build_depend>
+  <build_depend>python3-dev</build_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

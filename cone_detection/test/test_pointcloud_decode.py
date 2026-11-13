@@ -57,3 +57,16 @@ def test_aligned_32():
 def test_sim_16_xyzi():
     xyz = ConeDetectionNode.pointcloud2_to_xyz(_cloud(POINTS, 16, XYZ))
     assert np.allclose(xyz, np.array(POINTS, dtype=np.float32))
+
+
+def test_cpp_decode_matches_numpy():
+    """detector_backend=cpp decodes in C++: same array for every layout."""
+    import pytest
+
+    core = pytest.importorskip("cone_detection_core")
+    for step, layout in ((26, ATX), (32, ATX), (16, XYZ)):
+        msg = _cloud(POINTS, step, layout)
+        want = ConeDetectionNode.pointcloud2_to_xyz(msg)
+        got = ConeDetectionNode.pointcloud2_to_xyz(msg, core.decode_xyz)
+        assert got.dtype == np.float32 and got.shape == want.shape
+        np.testing.assert_array_equal(got, want)
