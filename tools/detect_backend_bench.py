@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "cone_detection"))
 sys.path.insert(0, str(REPO / "cone_detection" / "test" / "golden"))
 
-STAGES = ("crop_ms", "ransac_ms", "rotate_ms", "column_veto_ms", "guard_ms", "dbscan_ms", "fit_ms")
+STAGES = ("crop_ms", "ground_ms", "rotate_ms", "column_veto_ms", "guard_ms", "dbscan_ms", "fit_ms")
 
 
 def _spin():
@@ -65,7 +65,7 @@ def bag_scans(path: str, limit: int):
     from rclpy.serialization import deserialize_message
     from sensor_msgs.msg import PointCloud2
 
-    from cone_detection.cone_detection_node import ConeDetectionNode
+    from cone_detection.conversions import pointcloud2_to_xyz
 
     yield_decode = bag_scans.decode  # set by main
     with open(path, "rb") as fh:
@@ -77,7 +77,7 @@ def bag_scans(path: str, limit: int):
             t0 = time.perf_counter()
             cloud = deserialize_message(message.data, PointCloud2)
             t1 = time.perf_counter()
-            xyz = ConeDetectionNode.pointcloud2_to_xyz(cloud, yield_decode)
+            xyz = pointcloud2_to_xyz(cloud, yield_decode)
             t2 = time.perf_counter()
             yield (t1 - t0) * 1e3, (t2 - t1) * 1e3, xyz
 
@@ -99,7 +99,8 @@ def main() -> None:
 
     import golden
 
-    from cone_detection.cone_detection import RealtimeConeDetector, warmup_numba_functions
+    from cone_detection.detector import RealtimeConeDetector
+    from cone_detection.warmup import warmup_numba_functions
 
     cfg = golden.production_config(args.backend)
     t = time.perf_counter()
@@ -122,7 +123,7 @@ def main() -> None:
         for deser_ms, decode_ms, xyz in source:
             st: dict = {}
             t0 = time.perf_counter()
-            cones = det.detect(xyz, stage_timings=st)
+            cones = det.detect(xyz, stage_timings=st, keep_scan=False).cones
             detect_ms = (time.perf_counter() - t0) * 1e3
             rows.append(
                 dict(

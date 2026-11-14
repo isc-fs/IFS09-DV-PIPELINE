@@ -13,7 +13,7 @@ import pytest
 pytest.importorskip("rclpy")
 from sensor_msgs.msg import PointCloud2, PointField  # noqa: E402
 
-from cone_detection import cone_detection_node as cdn  # noqa: E402
+from cone_detection import node as cdn  # noqa: E402
 from cone_detection.strategies.cone_detection_strategy import ConeObservation  # noqa: E402
 
 from test_deskew import OFFSETS, STAMP, STEP, _cloud  # noqa: E402

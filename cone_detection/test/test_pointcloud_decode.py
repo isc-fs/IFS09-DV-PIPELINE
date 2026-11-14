@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from cone_detection.cone_detection_node import ConeDetectionNode
+from cone_detection.node import ConeDetectionNode
 
 
 def _field(name, offset, datatype):

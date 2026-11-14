@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from sklearn.cluster import DBSCAN
 
-from cone_detection.clustering import grid_dbscan
+from cone_detection.clustering.dbscan import grid_dbscan
 
 
 def _same_partition(a, b):
@@ -47,7 +47,7 @@ def _scene(seed=0):
 
 def test_pypi_backend_matches_sklearn_when_installed():
     pytest.importorskip("dbscan")
-    from cone_detection.clustering import fast_dbscan
+    from cone_detection.clustering.dbscan import fast_dbscan
 
     pts = _scene()
     got = fast_dbscan(pts, 0.3, 2, "pypi")
@@ -58,7 +58,7 @@ def test_pypi_backend_falls_back_to_grid_when_missing(monkeypatch):
     import builtins
     import logging
 
-    import cone_detection.clustering as cl
+    import cone_detection.clustering.dbscan as cl
 
     real_import = builtins.__import__
 
@@ -88,6 +88,6 @@ def test_pypi_backend_falls_back_to_grid_when_missing(monkeypatch):
 
 
 def test_unsupported_min_samples_defers_to_sklearn():
-    from cone_detection.clustering import fast_dbscan
+    from cone_detection.clustering.dbscan import fast_dbscan
 
     assert fast_dbscan(_scene(), 0.3, 5, "grid") is None

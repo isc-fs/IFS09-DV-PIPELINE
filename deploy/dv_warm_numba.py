@@ -101,7 +101,7 @@ def warm_all() -> dict[str, float]:
     """Run every warm-up; returns seconds per node."""
     out = {}
     t0 = time.perf_counter()
-    from cone_detection.cone_detection import warmup_numba_functions
+    from cone_detection.warmup import warmup_numba_functions
 
     for cfg in cone_detection_configs():
         warmup_numba_functions(cfg)

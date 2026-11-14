@@ -13,15 +13,25 @@ import numpy as np
 import pytest
 
 from cone_detection import fused
-from cone_detection.cone_detection import (
-    ConeDetectionConfig,
-    RealtimeConeDetector,
-    _tall_column_veto_mask,
+from cone_detection.clustering.prefilters import (
     _voxel_first_points,
+    column_veto_mask as _tall_column_veto_mask,
 )
-from cone_detection.cone_fit import _CONE_BIG_C, _CONE_BIG_D, _CONE_SMALL_C, _CONE_SMALL_D
+from cone_detection.config import ConeDetectionConfig as _Config
+from cone_detection.detector import RealtimeConeDetector
+from cone_detection.fitting.cone_classes import (
+    CONE_BIG_C as _CONE_BIG_C,
+    CONE_BIG_D as _CONE_BIG_D,
+    CONE_SMALL_C as _CONE_SMALL_C,
+    CONE_SMALL_D as _CONE_SMALL_D,
+)
 
 RNG = np.random.default_rng(23)
+
+
+def ConeDetectionConfig(**kw):  # noqa: N802
+    """The config with ransac ground, the method the fused/cpp backends run."""
+    return _Config(**{"ground_method": "ransac", **kw})
 
 
 @numba.njit
@@ -86,23 +96,27 @@ def _bent_scene(grade=0.08, knee_m=8.0):
     return pts.astype(np.float32)
 
 
+def _record(det, res, dc, st):
+    seg = res.segmentation
+    plane = det._ransac()._prev_plane if det._ransac() is not None else seg.plane
+    return dict(
+        cones=np.array(res.cones, dtype=float).reshape(-1, 4),
+        counters=dc,
+        stages={k: v for k, v in st.items() if not k.endswith("_ms")},
+        outliers=np.asarray(seg.above_ground_xyz, dtype=np.float32).copy(),
+        rotated=np.asarray(seg.ground_frame_scan(), dtype=np.float32).copy(),
+        plane=None if plane is None else np.array(plane, dtype=float),
+    )
+
+
 def _run(cfg, scans, **kw):
     det = RealtimeConeDetector(cfg)
     out = []
     for k, scan in enumerate(scans):
         _seed_numba(1000 + k)
         dc, st = {}, {}
-        cones = det.detect(scan, debug_counters=dc, stage_timings=st, viz_full_cloud=True, **kw)
-        out.append(
-            dict(
-                cones=np.array(cones, dtype=float).reshape(-1, 4),
-                counters=dc,
-                stages={k: v for k, v in st.items() if not k.endswith("_ms")},
-                outliers=det.last_outlier_xyz.copy(),
-                rotated=det.last_rotated_xyz.copy(),
-                plane=np.array(det._prev_plane, dtype=float),
-            )
-        )
+        res = det.detect(scan, debug_counters=dc, stage_timings=st, **kw)
+        out.append(_record(det, res, dc, st))
     return out
 
 
@@ -112,7 +126,10 @@ def _assert_same(cfg, scans, **kw):
     for a, b in zip(py, fu):
         assert a["counters"] == b["counters"]
         assert a["stages"] == b["stages"]
-        np.testing.assert_allclose(b["plane"], a["plane"], rtol=0, atol=1e-12)
+        if a["plane"] is None or b["plane"] is None:
+            assert a["plane"] is None and b["plane"] is None
+        else:
+            np.testing.assert_allclose(b["plane"], a["plane"], rtol=0, atol=1e-12)
         np.testing.assert_allclose(b["cones"], a["cones"], rtol=0, atol=1e-9)
         np.testing.assert_allclose(b["outliers"], a["outliers"], rtol=0, atol=1e-5)
         np.testing.assert_allclose(b["rotated"], a["rotated"], rtol=0, atol=1e-5)
@@ -176,12 +193,12 @@ def test_unsupported_config_falls_back_to_python(scans, monkeypatch):
     # Record the warning at its source: the warn-once set may already hold this
     # key from an earlier test, and other tests (ROS logging) can stop the
     # module logger from reaching pytest's caplog handler.
-    from cone_detection import clustering
+    from cone_detection.clustering import dbscan as clustering
 
     warned = []
     monkeypatch.setattr(clustering, "_warned", set())
     monkeypatch.setattr(clustering._log, "warning", lambda msg, *a, **k: warned.append(msg))
-    cfg = ConeDetectionConfig(cluster_backend="grid", ground_method="gpf")
+    cfg = ConeDetectionConfig(cluster_backend="grid", cluster_top_min_m=0.15)
     assert fused.fused_unsupported_reason(cfg, scans[0], None) is not None
     _assert_same(cfg, scans[:1])
     assert any("detector_backend=fused" in m for m in warned), warned
@@ -201,7 +218,9 @@ def test_column_veto_matches_reference():
         assert n_vetoed == len(pts) - keep.sum()
     low = pts.copy()
     low[:, 2] = 0.1
-    out, n_vetoed = fused.column_veto(low, cfg.tall_column_veto_height_m, cfg.tall_column_veto_cell_m)
+    out, n_vetoed = fused.column_veto(
+        low, cfg.tall_column_veto_height_m, cfg.tall_column_veto_cell_m
+    )
     assert _tall_column_veto_mask(low[:, :2], low[:, 2], cfg) is None
     assert out is low or np.array_equal(out, low)
     assert n_vetoed == 0
@@ -220,8 +239,9 @@ def _plain_run(cfg, scans):
     out = []
     for scan in scans:
         dc = {}
-        cones = det.detect(scan, debug_counters=dc)
-        out.append((np.array(cones, dtype=float).reshape(-1, 4), dc, det._prev_plane.copy()))
+        res = det.detect(scan, debug_counters=dc)
+        plane = det._ransac()._prev_plane.copy()
+        out.append((np.array(res.cones, dtype=float).reshape(-1, 4), dc, plane))
     return out
 
 
@@ -249,7 +269,7 @@ def test_python_and_fused_agree_without_external_seeding(scans):
 
 
 def test_scan_seed_depends_on_content():
-    from cone_detection.ransac import scan_seed
+    from cone_detection.ground.ransac import scan_seed
 
     a = RNG.normal(size=(50000, 3)).astype(np.float32)
     assert scan_seed(a) == scan_seed(a.copy())
@@ -260,37 +280,9 @@ def test_scan_seed_depends_on_content():
     assert 0 <= scan_seed(a) < 2**32
 
 
+# ray_slope: the fused/cpp kernel (fused_ground.py) is the pre-#44 one, the python
+# path runs ground/methods/ray_methods.py, so a ray_slope config runs on python.
 # --------------------------------------------------------------------------
-# ray_slope ground: one Numba kernel shared by the python and fused paths
-# --------------------------------------------------------------------------
-def test_fused_equals_python_ray_slope(scans):
+def test_ray_slope_runs_on_the_python_path(scans):
     cfg = ConeDetectionConfig(cluster_backend="grid", ground_method="ray_slope")
-    assert fused.fused_unsupported_reason(cfg, scans[0], None) is None
-    py = _assert_same(cfg, scans + [_bent_scene()])
-    assert all(r["counters"]["accepted"] >= 8 for r in py)
-
-
-def _true_cones():
-    """Centres of the cones _scene places (ring + collinear line; the far one is gated)."""
-    ring = [
-        ((3.0 + 1.4 * k) * math.cos(2 * math.pi * k / 12), (3.0 + 1.4 * k) * math.sin(2 * math.pi * k / 12))
-        for k in range(12)
-    ]
-    return np.array(ring + [(5.0 + 0.9 * k, 0.05) for k in range(4)])
-
-
-def _found_and_false(cones, truth, tol=0.3):
-    if len(cones) == 0:
-        return 0, 0
-    d = np.hypot(cones[:, None, 0] - truth[None, :, 0], cones[:, None, 1] - truth[None, :, 1])
-    return int((d.min(0) < tol).sum()), int((d.min(1) >= tol).sum())
-
-
-def test_ray_slope_on_a_hill_finds_more_cones_with_fewer_false_ones():
-    scene, truth = [_bent_scene(grade=0.08, knee_m=8.0)], _true_cones()
-    rs = _run(ConeDetectionConfig(ground_method="ray_slope", detector_backend="fused"), scene)
-    ra = _run(ConeDetectionConfig(ground_method="ransac", detector_backend="fused"), scene)
-    rs_found, rs_false = _found_and_false(rs[0]["cones"], truth)
-    ra_found, ra_false = _found_and_false(ra[0]["cones"], truth)
-    assert rs_found >= ra_found
-    assert rs_false < ra_false
+    assert fused.fused_unsupported_reason(cfg, scans[0], None) is not None

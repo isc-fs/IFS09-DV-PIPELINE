@@ -1,5 +1,5 @@
 """
-LiDAR cone detection for behavior ``base``: RANSAC + DBSCAN + template-dispatch fit.
+LiDAR cone detection for behavior ``base``: ground removal + DBSCAN + template-dispatch fit.
 
 Returns :class:`DetectionResult` only; the ROS node builds and publishes markers.
 """
@@ -11,15 +11,14 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from cone_detection.cone_detection import (
-    ConeDetectionConfig,
-    RealtimeConeDetector,
-    warmup_numba_functions,
-)
+from cone_detection.config import ConeDetectionConfig
+from cone_detection.detector import RealtimeConeDetector
+from cone_detection.warmup import warmup_numba_functions
 from cone_detection.strategies.cone_detection_strategy import (
     ConeDetectionStrategy,
     ConeObservation,
     DetectionResult,
+    _empty_xyz,
 )
 
 
@@ -27,10 +26,6 @@ class BaseConeDetection(ConeDetectionStrategy):
     """Default LiDAR cone pipeline (mode-manager behavior key ``base``)."""
 
     CONE_DETECTION_CONFIG: ClassVar[ConeDetectionConfig | None] = None
-
-    # Template apex heights: small 0.35 m, big orange 0.55 m (see cone_fit).
-    # Threshold sits midway so the type label survives numerical wobble.
-    BIG_ORANGE_HEIGHT_THRESHOLD_M = 0.45
 
     # Log a per-scan template-dispatch summary every Nth scan (small/big counts,
     # residual stats). Set to 0 to disable. At 20 Hz, N=20 ≈ 1 Hz.
@@ -44,9 +39,6 @@ class BaseConeDetection(ConeDetectionStrategy):
         self._scan_count = 0
         self._config = config or self.CONE_DETECTION_CONFIG
         self._detector = RealtimeConeDetector(self._config)
-
-    def big_orange_height_threshold_m(self) -> float:
-        return self.BIG_ORANGE_HEIGHT_THRESHOLD_M
 
     def configure(self) -> None:
         if not self._numba_warmup_done:
@@ -65,10 +57,9 @@ class BaseConeDetection(ConeDetectionStrategy):
         point_cloud: np.ndarray,
         *,
         stage_timings: dict[str, float] | None = None,
-        ransac_iter_subsample_max: int = 5000,
         viz_full_cloud: bool = False,
     ) -> DetectionResult:
-        """Run RANSAC + DBSCAN + template-dispatch fit; no ROS types."""
+        """Run ground removal + DBSCAN + template-dispatch fit; no ROS types."""
         compare_logger = None
         if self.LOG_FIT_COMPARISON_EVERY_N > 0:
             self._scan_count += 1
@@ -77,17 +68,18 @@ class BaseConeDetection(ConeDetectionStrategy):
 
         debug_counters: dict[str, int] = {}
         cones: list[ConeObservation] = []
+        rotated_xyz = above_ground_xyz = _empty_xyz()
+        labels = np.zeros(0, dtype=np.int64)
         st = stage_timings if stage_timings is not None else {}
         # Degenerate clusters can still throw; swallow and log so one bad scan
         # does not take down the node.
         try:
-            raw = self._detector.detect(
+            res = self._detector.detect(
                 point_cloud,
                 debug_counters=debug_counters,
                 compare_logger=compare_logger,
                 stage_timings=st,
-                ransac_iter_subsample_max=ransac_iter_subsample_max,
-                viz_full_cloud=viz_full_cloud,
+                keep_scan=viz_full_cloud,
             )
             cones = [
                 ConeObservation(
@@ -96,15 +88,20 @@ class BaseConeDetection(ConeDetectionStrategy):
                     height_m=float(entry[2]) if len(entry) >= 3 else 0.0,
                     sigma_xy=float(entry[3]) if len(entry) >= 4 else -1.0,
                 )
-                for entry in raw
+                for entry in res.cones
             ]
+            above_ground_xyz = res.segmentation.above_ground_xyz
+            labels = res.segmentation.labels
+            if viz_full_cloud:
+                rotated_xyz = res.segmentation.ground_frame_scan()
         except Exception:
             self._log.error(traceback.format_exc())
 
         return DetectionResult(
             cones=cones,
             debug_counters=debug_counters,
-            rotated_xyz=self._detector.last_rotated_xyz,
-            outlier_xyz=self._detector.last_outlier_xyz,
+            rotated_xyz=rotated_xyz,
+            above_ground_xyz=above_ground_xyz,
+            labels=labels,
             stage_timings=st,
         )

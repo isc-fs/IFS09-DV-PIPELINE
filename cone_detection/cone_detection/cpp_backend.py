@@ -28,7 +28,7 @@ import time
 import numpy as np
 
 from cone_detection import fused
-from cone_detection.clustering import fast_dbscan
+from cone_detection.clustering.dbscan import fast_dbscan
 
 try:  # built by colcon from perception_cpp/cone_detection_core
     import cone_detection_core as _core
@@ -72,7 +72,6 @@ def run_scan(
     cfg,
     *,
     initial_plane: np.ndarray | None,
-    ransac_iter_subsample_max: int,
     clustering_class: type,
     fast_clustering: bool,
     stage_timings: dict,
@@ -93,8 +92,8 @@ def run_scan(
         crop2,
         min2,
         float(cfg.ransac_prob),
-        float(cfg.ransac_threshold),
-        int(ransac_iter_subsample_max),
+        float(cfg.ground_threshold_m),
+        int(cfg.ransac_iter_subsample_max),
         bool(cfg.tall_column_veto),
         float(cfg.tall_column_veto_height_m),
         float(cfg.tall_column_veto_cell_m),
@@ -110,9 +109,9 @@ def run_scan(
     if n_cropped == 0:
         return out
     out.coefs = coefs
-    st["ransac_ms"] = t["ransac_ms"]
+    st["ground_ms"] = t["ransac_ms"]
     st["rotate_ms"] = t["rotate_ms"]
-    st["n_outliers"] = float(n_outliers)
+    st["n_above_ground"] = float(n_outliers)
     out.clean = clean
     if n_outliers == 0:
         st["dbscan_ms"] = 0.0

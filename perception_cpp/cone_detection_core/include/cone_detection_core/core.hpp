@@ -55,7 +55,7 @@ struct Plane {
   std::array<double, 4> coefs{0.0, 0.0, 0.0, 1.0};  // [bias, nx, ny, nz]
 };
 
-// ransac.ransac2 (m = 3) without the augmented copy (= fused.ransac_plane).
+// ground.ransac.ransac_ground_mask (= fused.ransac_plane): ground plane by RANSAC.
 // warm: empty or 4 coefs. outliers gets one flag per point.
 Plane ransac_plane(const Cloud& xyz, double prob, double threshold, int64_t max_iter,
                    int64_t n_sub_max, const std::vector<double>& warm, NumbaMt& rng,

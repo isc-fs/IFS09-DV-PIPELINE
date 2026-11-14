@@ -12,13 +12,10 @@ import math
 
 import numpy as np
 
-from cone_detection.cone_detection import (
-    ConeDetectionConfig,
-    RealtimeConeDetector,
-    _tall_column_veto_mask,
-    clustering_separation_rt,
-)
-from cone_detection.cone_fit import _CONE_SMALL_C, _CONE_SMALL_D
+from cone_detection.config import ConeDetectionConfig
+from cone_detection.detector import RealtimeConeDetector
+from cone_detection.clustering.prefilters import column_veto_mask
+from cone_detection.fitting.cone_classes import CONE_SMALL_C, CONE_SMALL_D
 
 RNG = np.random.default_rng(7)
 
@@ -32,8 +29,8 @@ def _ground(n: int = 8000) -> np.ndarray:
 
 def _cone_cluster(cx: float, cy: float, n: int = 30) -> np.ndarray:
     """One-sided near-face small-cone cluster (as in warmup_numba_functions)."""
-    z = RNG.uniform(0.06, _CONE_SMALL_D - 0.03, size=n)
-    gamma = (_CONE_SMALL_D - z) / _CONE_SMALL_C
+    z = RNG.uniform(0.06, CONE_SMALL_D - 0.03, size=n)
+    gamma = (CONE_SMALL_D - z) / CONE_SMALL_C
     norm = math.hypot(cx, cy)
     ux, uy = cx / norm, cy / norm
     psi = RNG.uniform(-1.0, 1.0, size=n)
@@ -57,7 +54,7 @@ def test_mask_is_none_when_nothing_tall():
     cfg = ConeDetectionConfig()
     xy = RNG.uniform(-5.0, 5.0, (500, 2))
     h = RNG.uniform(0.0, 0.5, 500)
-    assert _tall_column_veto_mask(xy, h, cfg) is None
+    assert column_veto_mask(xy, h, cfg) is None
 
 
 def test_mask_drops_whole_column_including_low_band():
@@ -71,7 +68,7 @@ def test_mask_drops_whole_column_including_low_band():
     far_xy = np.array([[2.0, 2.0]])
     xy = np.vstack([col_xy, near_xy, far_xy])
     h = np.concatenate([col_h, [0.2], [0.2]])
-    keep = _tall_column_veto_mask(xy, h, cfg)
+    keep = column_veto_mask(xy, h, cfg)
     assert keep is not None
     assert not keep[:10].any()  # entire column vetoed, low band included
     assert not keep[10]  # adjacent cell caught by the 3x3 dilation
@@ -82,12 +79,12 @@ def test_veto_removes_wall_before_dbscan():
     scan = np.vstack([_ground(), _cone_cluster(5.0, 1.0), _wall()]).astype(np.float32)
     st_on: dict = {}
     st_off: dict = {}
-    _, pts_on, _ = clustering_separation_rt(
-        scan, ConeDetectionConfig(), stage_timings=st_on
-    )
-    _, pts_off, _ = clustering_separation_rt(
-        scan, ConeDetectionConfig(tall_column_veto=False), stage_timings=st_off
-    )
+    pts_on = RealtimeConeDetector(ConeDetectionConfig()).detect(
+        scan, stage_timings=st_on
+    ).segmentation.above_ground_xyz
+    pts_off = RealtimeConeDetector(ConeDetectionConfig(tall_column_veto=False)).detect(
+        scan, stage_timings=st_off
+    ).segmentation.above_ground_xyz
     assert st_on["n_vetoed"] > 2000  # the wall went away
     assert "n_vetoed" not in st_off
     assert len(pts_off) - len(pts_on) > 2000
@@ -101,11 +98,11 @@ def test_detect_same_cone_with_and_without_wall():
     base = np.vstack([_ground(), cone]).astype(np.float32)
     walled = np.vstack([_ground(), cone, _wall()]).astype(np.float32)
 
-    cones_base = RealtimeConeDetector(ConeDetectionConfig()).detect(base)
+    cones_base = RealtimeConeDetector(ConeDetectionConfig()).detect(base).cones
     st: dict = {}
     cones_wall = RealtimeConeDetector(ConeDetectionConfig()).detect(
         walled, stage_timings=st
-    )
+    ).cones
 
     assert st["n_vetoed"] > 2000
     assert len(cones_base) == len(cones_wall) == 1

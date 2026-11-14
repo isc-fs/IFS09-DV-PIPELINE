@@ -1,7 +1,7 @@
 """Floyd's sampler that replaces np.random.choice in both RANSAC paths."""
 import numpy as np
 
-from cone_detection.ransac import sample_without_replacement, seed_numba_rng
+from cone_detection.ground.ransac import sample_without_replacement, seed_numba_rng
 
 
 def test_distinct_and_in_range():

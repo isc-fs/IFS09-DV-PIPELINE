@@ -11,7 +11,7 @@ identical scan by scan:
 
 The output is the Python path's output, not an approximation of it:
 
-* The RANSAC sampler has the same random number sequence as ``ransac.ransac2``.
+* RANSAC is the python path's own kernel (``ground.ransac.ransac_ground_mask``).
   Both draw from the Numba RNG, so seeding it reproduces both.
 * The rotation and the ground shift are the same.
 * The tall-column veto uses the same cells. A dense bitmap replaces sort/unique/isin.
@@ -42,9 +42,9 @@ import time
 import numba as nb
 import numpy as np
 
-from cone_detection.clustering import fast_dbscan
-from cone_detection.ransac import sample_without_replacement
-from cone_detection.ground_methods import (
+from cone_detection.clustering.dbscan import fast_dbscan
+from cone_detection.ground.ransac import ransac_ground_mask
+from cone_detection.fused_ground import (
     RAY_SLOPE_MAX_GAP_M,
     RAY_SLOPE_MAX_HEIGHT_M,
     RAY_SLOPE_MAX_SLOPE,
@@ -52,18 +52,20 @@ from cone_detection.ground_methods import (
     _FIT_MAX_POINTS,
     ray_slope_kernel,
 )
-from cone_detection.cone_fit import (
-    _CONE_BASE_RADIUS_M,
-    _CONE_BIG_C,
-    _CONE_BIG_D,
-    _CONE_CLASS_TOLERANCE,
-    _CONE_SMALL_C,
-    _CONE_SMALL_D,
-    _LINEARITY_THRESHOLD,
-    _NEAR_FACE_CENTROID_BIAS_FRAC,
-    _VARPRO_AB_BOUND_MARGIN_M,
-    _template_fit_gn,
+from cone_detection.fitting.closed_form_fits import (
+    LINEARITY_THRESHOLD as _LINEARITY_THRESHOLD,
+    NEAR_FACE_CENTROID_BIAS_FRAC as _NEAR_FACE_CENTROID_BIAS_FRAC,
+    VARPRO_AB_BOUND_MARGIN_M as _VARPRO_AB_BOUND_MARGIN_M,
 )
+from cone_detection.fitting.cone_classes import (
+    CONE_BASE_RADIUS_M as _CONE_BASE_RADIUS_M,
+    CONE_BIG_C as _CONE_BIG_C,
+    CONE_BIG_D as _CONE_BIG_D,
+    CONE_CLASS_TOLERANCE as _CONE_CLASS_TOLERANCE,
+    CONE_SMALL_C as _CONE_SMALL_C,
+    CONE_SMALL_D as _CONE_SMALL_D,
+)
+from cone_detection.fitting.template_fit import _template_fit_gn
 
 # Voxel keys of the clustering-input guard; same packing as
 # cone_detection._GUARD_KEY_OFFSET / _GUARD_KEY_BITS.
@@ -81,13 +83,15 @@ SMALL, BIG, AMBIGUOUS, SHAPE_REJECTED, RESIDUAL_REJECTED = 5, 6, 7, 8, 9
 
 # Ground methods the fused (and cpp) path runs. ray_slope is one Numba kernel
 # shared with the python path, so it is exact by construction.
-FUSED_GROUND_METHODS = ("ransac", "ray_slope")
+# ray_slope: fused_ground.ray_slope_kernel is the pre-#44 ray_slope; the python path
+# now runs a different one (ground/methods/ray_methods.py), so only ransac is exact.
+FUSED_GROUND_METHODS = ("ransac",)
 
 
 def ray_slope_args(cfg) -> tuple:
     """ray_slope_kernel's arguments after the cloud (the cpp core takes the same)."""
     return (
-        float(cfg.ransac_threshold),
+        float(cfg.ground_threshold_m),
         RAY_SLOPE_MAX_SLOPE,
         RAY_SLOPE_MAX_GAP_M,
         RAY_SLOPE_MAX_HEIGHT_M,
@@ -99,13 +103,18 @@ def ray_slope_args(cfg) -> tuple:
 def fused_unsupported_reason(cfg, data, clustering_class) -> str | None:
     """``None`` when the fused path reproduces ``cfg`` exactly, else why not."""
     if cfg.ground_method not in FUSED_GROUND_METHODS:
-        return f"ground_method={cfg.ground_method!r} (fused: {', '.join(FUSED_GROUND_METHODS)} only)"
+        only = ", ".join(FUSED_GROUND_METHODS)
+        return f"ground_method={cfg.ground_method!r} (fused: {only} only)"
     if cfg.fit_backend != "template_dispatch":
         return f"fit_backend={cfg.fit_backend!r} (fused: 'template_dispatch' only)"
     if cfg.cone_fit_solver != "gn":
         return f"cone_fit_solver={cfg.cone_fit_solver!r} (fused: 'gn' only)"
     if cfg.flat_cell_filter:
         return "flat_cell_filter=True (not in the fused path)"
+    if not cfg.ground_threshold_m > 0:
+        return "ground_threshold_m <= 0 (MAD threshold; fused: a fixed threshold only)"
+    if cfg.cluster_top_min_m > 0:
+        return "cluster_top_min_m > 0 (not in the fused path)"
     shape = getattr(data, "shape", ())
     if len(shape) != 2 or shape[1] != 3:
         return f"input shape {shape} (fused: (N, 3) only)"
@@ -143,106 +152,13 @@ def crop_promote(xyz, crop2, min2):
     return out[:m]
 
 
-@nb.njit(cache=True, error_model="numpy")  # IEEE nan/inf like the numpy reference
 def ransac_plane(xyz, prob, threshold, max_iter, n_sub_max, warm):
-    """``ransac.ransac2`` (m=3) on xyz without the augmented copy.
+    """The python path's RANSAC kernel itself (``ground.ransac.ransac_ground_mask``),
+    so for the same seed both pick the same plane.
 
-    Same algorithm and the same Numba RNG call sequence, so for the same seed
-    it picks the same plane. Returns (outlier mask, coefs [bias, nx, ny, nz]).
+    Returns (non-ground mask, coefs [bias, nx, ny, nz]).
     """
-    m = 3
-    n = xyz.shape[0]
-    if n > n_sub_max:
-        sub = sample_without_replacement(n, n_sub_max)
-        ns = n_sub_max
-    else:
-        sub = np.arange(n)
-        ns = n
-    sx = np.empty(ns)
-    sy = np.empty(ns)
-    sz = np.empty(ns)
-    for i in range(ns):
-        j = sub[i]
-        sx[i] = xyz[j, 0]
-        sy[i] = xyz[j, 1]
-        sz[i] = xyz[j, 2]
-    k = float(max_iter)
-    support = 0
-    best = np.array([0.0, 0.0, 0.0, 1.0])
-    if warm.shape[0] == 4 and abs(warm[3]) > 1e-12:
-        c0 = warm[0] / -warm[3]
-        c1 = warm[1] / -warm[3]
-        c2 = warm[2] / -warm[3]
-        s = 0
-        for i in range(ns):
-            if abs(c0 + c1 * sx[i] + c2 * sy[i] - sz[i]) < threshold:
-                s += 1
-        s -= m
-        if s > support:
-            support = s
-            best = warm.copy()
-            r = support / ns
-            if 0.0 < r < 1.0:
-                kn = math.log(1 - prob) / math.log(1 - r**m)
-                if kn < k:
-                    k = kn
-    idx = np.empty(m, dtype=np.int64)
-    it = 0
-    while it < k and it < max_iter:
-        for jj in range(m):
-            while True:
-                cand = np.random.randint(0, n)
-                dup = False
-                for kk in range(jj):
-                    if idx[kk] == cand:
-                        dup = True
-                        break
-                if not dup:
-                    idx[jj] = cand
-                    break
-        p0x = xyz[idx[0], 0]
-        p0y = xyz[idx[0], 1]
-        p0z = xyz[idx[0], 2]
-        v1x = xyz[idx[1], 0] - p0x
-        v1y = xyz[idx[1], 1] - p0y
-        v1z = xyz[idx[1], 2] - p0z
-        v2x = xyz[idx[2], 0] - p0x
-        v2y = xyz[idx[2], 1] - p0y
-        v2z = xyz[idx[2], 2] - p0z
-        nx = v1y * v2z - v1z * v2y
-        ny = v1z * v2x - v1x * v2z
-        nz = v1x * v2y - v1y * v2x
-        nn = math.sqrt(nx * nx + ny * ny + nz * nz)
-        nx /= nn
-        ny /= nn
-        nz /= nn
-        bias = -(nx * p0x + ny * p0y + nz * p0z)
-        c0 = bias / -nz
-        c1 = nx / -nz
-        c2 = ny / -nz
-        s = 0
-        for i in range(ns):
-            if abs(c0 + c1 * sx[i] + c2 * sy[i] - sz[i]) < threshold:
-                s += 1
-        s -= m
-        if s > support:
-            support = s
-            best = np.array([bias, nx, ny, nz])
-            r = support / ns
-            if 0.0 < r < 1.0:
-                kn = math.log(1 - prob) / math.log(1 - r**m)
-                if kn < k:
-                    k = kn
-        it += 1
-    if best[3] < 0:
-        best = -best
-    c0 = best[0] / -best[3]
-    c1 = best[1] / -best[3]
-    c2 = best[2] / -best[3]
-    out = np.empty(n, dtype=np.bool_)
-    for i in range(n):
-        out[i] = not (abs(c0 + c1 * xyz[i, 0] + c2 * xyz[i, 1] - xyz[i, 2]) < threshold)
-    return out, best
+    return ransac_ground_mask(xyz, prob, threshold, max_iter, n_sub_max, warm)
 
 
 @nb.njit(cache=True, error_model="numpy")
@@ -686,7 +602,6 @@ def run_scan(
     cfg,
     *,
     initial_plane: np.ndarray | None,
-    ransac_iter_subsample_max: int,
     clustering_class: type,
     fast_clustering: bool,
     stage_timings: dict,
@@ -722,14 +637,14 @@ def run_scan(
         outl, coefs = ransac_plane(
             pts,
             float(cfg.ransac_prob),
-            float(cfg.ransac_threshold),
+            float(cfg.ground_threshold_m),
             _RANSAC_MAX_ITER,
-            int(ransac_iter_subsample_max),
+            int(cfg.ransac_iter_subsample_max),
             warm,
         )
     out.coefs = coefs
     t1 = time.perf_counter()
-    st["ransac_ms"] = (t1 - t0) * 1000.0
+    st["ground_ms"] = (t1 - t0) * 1000.0
 
     w = coefs[1:]
     nrm = math.sqrt(float(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]))
@@ -737,7 +652,7 @@ def run_scan(
     sel = select_rotate(pts, outl, rot_to_normal(coefs), floor)
     t2 = time.perf_counter()
     st["rotate_ms"] = (t2 - t1) * 1000.0
-    st["n_outliers"] = float(len(sel))
+    st["n_above_ground"] = float(len(sel))
     out.clean = sel
     if len(sel) == 0:
         st["dbscan_ms"] = 0.0

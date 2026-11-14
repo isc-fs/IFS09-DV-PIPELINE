@@ -2,6 +2,9 @@
 
 Subscribes to /fsds/lidar/Lidar1 (sensor_msgs/PointCloud2) and publishes:
 
+  - /cones_raw, /cones_orange — the same cones as the two MarkerArrays below as
+                     dv_msgs/ConeArray (base_link): what SLAM and control read.
+                     Positions are deskewed to header.stamp (deskew.py).
   - /Conos_raw     — every detected cone (MarkerArray, base_link frame).
                      marker.scale.x carries per-cone σ_xy for SLAM;
                      marker.scale.z carries cluster / template height for the
@@ -9,12 +12,12 @@ Subscribes to /fsds/lidar/Lidar1 (sensor_msgs/PointCloud2) and publishes:
   - /Conos_Orange  — big-orange cones only, kept on a separate stream so the
                      autonomous-stop control logic does not need to filter the
                      full cone list.
-  - /lidar_points/ground — cropped scan after the same RANSAC rotation used
+  - /lidar_points/ground — cropped scan after the same ground-frame rotation used
                      for clustering, floor at z=0 so it overlays /Conos_raw
                      (includes ground inliers). Published only if subscribed.
-  - /lidar_points/above_ground — RANSAC outliers only (the points clustering
+  - /lidar_points/above_ground — non-ground points only (the points clustering
                      actually sees). Published only if subscribed.
-  - /cone_detection/{hz,latency_ms,ransac_ms,dbscan_ms,fit_ms,n_accepted}
+  - /cone_detection/{hz,latency_ms,ground_ms,dbscan_ms,fit_ms,n_accepted}
                      — per-scan / per-second Float32 diagnostics for Lichtblick.
 
 Perception algorithms live in :class:`~cone_detection.strategies.ConeDetectionStrategy`
@@ -50,8 +53,6 @@ import rclpy
 import numpy as np
 from typing import TYPE_CHECKING
 
-from cone_detection.deskew import deskew_xy, scan_time_model, stamp_seconds
-
 from builtin_interfaces.msg import Time
 from dv_msgs.msg import ConeArray
 from nav_msgs.msg import Odometry
@@ -64,14 +65,21 @@ from rclpy.qos import (
     QoSProfile,
     QoSReliabilityPolicy,
 )
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import PointCloud2
 from std_msgs.msg import Float32
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
+
+from cone_detection.conversions import (
+    cones_to_arrays,
+    cones_to_markers,
+    pointcloud2_to_xyz,
+    xyz_to_pointcloud2,
+)
+from cone_detection.deskew import deskew_xy, scan_time_model, stamp_seconds
 
 if TYPE_CHECKING:
     from cone_detection.strategies.cone_detection_strategy import (
         ConeDetectionStrategy,
-        ConeObservation,
         DetectionResult,
     )
 
@@ -102,7 +110,7 @@ QOS_LATEST = QoSProfile(
 _PERF_TOPICS = (
     ("hz", "_pub_hz"),
     ("latency_ms", "_pub_latency_ms"),
-    ("ransac_ms", "_pub_ransac_ms"),
+    ("ground_ms", "_pub_ground_ms"),
     ("dbscan_ms", "_pub_dbscan_ms"),
     ("fit_ms", "_pub_fit_ms"),
     ("n_accepted", "_pub_n_accepted"),
@@ -112,6 +120,14 @@ _PERF_TOPICS = (
     ("n_far_dropped", "_pub_n_far_dropped"),
     ("n_left", "_pub_n_left"),
     ("n_right", "_pub_n_right"),
+)
+
+
+# Every publisher attribute: created in on_configure, destroyed in on_cleanup.
+_PUBLISHER_ATTRS = (
+    "_pub_markers", "_pub_orange", "_pub_cones", "_pub_cones_orange", "_pub_ground", "_pub_above",
+) + tuple(
+    attr for _, attr in _PERF_TOPICS
 )
 
 
@@ -142,36 +158,6 @@ def _publish_cloud(pub, xyz: np.ndarray, stamp: Time) -> None:
     pub.publish(xyz_to_pointcloud2(xyz, stamp))
 
 
-def xyz_to_pointcloud2(
-    xyz: np.ndarray,
-    stamp: Time,
-    frame_id: str = "base_link",
-) -> PointCloud2:
-    """Pack an ``(N, 3)`` xyz array as a dense xyz32 PointCloud2."""
-    pts = np.ascontiguousarray(np.asarray(xyz, dtype=np.float32))
-    if pts.ndim != 2 or pts.shape[1] < 3:
-        pts = np.zeros((0, 3), dtype=np.float32)
-    else:
-        pts = pts[:, :3]
-    n = int(pts.shape[0])
-    msg = PointCloud2()
-    msg.header.stamp = stamp
-    msg.header.frame_id = frame_id
-    msg.height = 1
-    msg.width = n
-    msg.is_dense = True
-    msg.is_bigendian = False
-    msg.point_step = 12
-    msg.row_step = 12 * n
-    msg.fields = [
-        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-    ]
-    msg.data = pts.tobytes()
-    return msg
-
-
 class ConeDetectionNode(BaseLifecycleNode):
     """LifecycleNode publishing per-scan cone observations."""
 
@@ -191,25 +177,10 @@ class ConeDetectionNode(BaseLifecycleNode):
         # holds no resources.
         self._is_active = False
         self._cone_strategy: ConeDetectionStrategy | None = None
-        self._pub_markers = None
-        self._pub_orange = None
-        self._pub_cones = None
-        self._pub_cones_orange = None
-        self._pub_ground = None
-        self._pub_above = None
-        self._pub_hz = None
-        self._pub_latency_ms = None
-        self._pub_ransac_ms = None
-        self._pub_dbscan_ms = None
-        self._pub_fit_ms = None
-        self._pub_n_accepted = None
-        self._pub_n_clusters = None
-        self._pub_n_input_points = None
-        self._pub_n_after_shape = None
-        self._pub_n_far_dropped = None
-        self._pub_n_left = None
-        self._pub_n_right = None
+        for attr in _PUBLISHER_ATTRS:
+            setattr(self, attr, None)
         self._sub = None
+        self._cpp_decode = None
         # Per-cone motion compensation (cone_detection/deskew.py). The /odom reader is
         # created on the first cloud that carries point times, so the sim (no
         # timestamp field) never pays for it.
@@ -358,26 +329,7 @@ class ConeDetectionNode(BaseLifecycleNode):
 
     def on_cleanup(self, state: State) -> TransitionCallbackReturn:
         # The LiDAR subscription is NOT destroyed here (see _ensure_lidar_sub).
-        for attr in (
-            "_pub_markers",
-            "_pub_orange",
-            "_pub_cones",
-            "_pub_cones_orange",
-            "_pub_ground",
-            "_pub_above",
-            "_pub_hz",
-            "_pub_latency_ms",
-            "_pub_ransac_ms",
-            "_pub_dbscan_ms",
-            "_pub_fit_ms",
-            "_pub_n_accepted",
-            "_pub_n_clusters",
-            "_pub_n_input_points",
-            "_pub_n_after_shape",
-            "_pub_n_far_dropped",
-            "_pub_n_left",
-            "_pub_n_right",
-        ):
+        for attr in _PUBLISHER_ATTRS:
             pub = getattr(self, attr, None)
             if pub is not None:
                 self.destroy_publisher(pub)
@@ -392,42 +344,8 @@ class ConeDetectionNode(BaseLifecycleNode):
     # ------------------------------------------------------------------
     # Per-scan callback
     # ------------------------------------------------------------------
-    @staticmethod
-    def pointcloud2_to_xyz(msg: PointCloud2, cpp_decode=None) -> np.ndarray:
-        """Decode PointCloud2 to ``(N, 3)`` float32 (x, y, z).
-
-        Reads x/y/z by their declared byte offsets over a ``point_step`` stride,
-        so ANY layout works regardless of whether ``point_step`` is a whole
-        number of float32s.
-
-        Do NOT reshape by ``point_step // 4``: the Hesai ATX driver publishes a
-        *packed* 26-byte point (x,y,z,intensity f32 + ring u16 + timestamp f64),
-        and 26 is not divisible by 4 — ``frombuffer(...).reshape(N, 26//4)`` then
-        raised ``ValueError`` on every scan, so the node silently emitted zero
-        cones (the sim's 16-byte cloud hid this). Offset slicing over a uint8
-        view handles packed-26, aligned-32, and the sim layouts alike.
-        """
-        num_points = msg.width * msg.height
-        if cpp_decode is not None:  # cone_detection_core.decode_xyz: same layout rules
-            off = {f.name: f.offset for f in msg.fields}
-            return cpp_decode(
-                msg.data, num_points, msg.point_step, off["x"], off["y"], off["z"]
-            )
-        raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-            num_points, msg.point_step
-        )
-        off = {f.name: f.offset for f in msg.fields}
-        try:
-            ox, oy, oz = off["x"], off["y"], off["z"]
-        except KeyError as exc:  # pragma: no cover - malformed cloud
-            raise ValueError(
-                f"PointCloud2 missing x/y/z field: have {sorted(off)}"
-            ) from exc
-        # .copy() makes each 4-byte column contiguous so .view(float32) is valid.
-        x = raw[:, ox:ox + 4].copy().view(np.float32).reshape(num_points)
-        y = raw[:, oy:oy + 4].copy().view(np.float32).reshape(num_points)
-        z = raw[:, oz:oz + 4].copy().view(np.float32).reshape(num_points)
-        return np.ascontiguousarray(np.stack((x, y, z), axis=1))
+    # Kept on the class for callers that decode through the node (tests, sim tools).
+    pointcloud2_to_xyz = staticmethod(pointcloud2_to_xyz)
 
     def listener_callback(self, msg: PointCloud2) -> None:
         # Defensive: should not fire if subscription was destroyed in
@@ -438,23 +356,21 @@ class ConeDetectionNode(BaseLifecycleNode):
         if self._pub_cones is None or self._pub_cones_orange is None:
             return
 
-        point_cloud = self.pointcloud2_to_xyz(msg, getattr(self, "_cpp_decode", None))
+        point_cloud = self.pointcloud2_to_xyz(msg, self._cpp_decode)
         want_ground = _has_subs(self._pub_ground)
         t0 = time.perf_counter()
         result = self._cone_strategy.detect_cones(
             point_cloud, viz_full_cloud=want_ground
         )
         total_ms = (time.perf_counter() - t0) * 1000.0
-        self._accumulate_diagnostics(result)
+        big_orange_threshold = self._cone_strategy.big_orange_height_threshold_m()
+        self._accumulate_diagnostics(result, big_orange_threshold)
         self._publish_perf(result, total_ms)
         if want_ground:
             _publish_cloud(self._pub_ground, result.rotated_xyz, msg.header.stamp)
-        _publish_cloud(self._pub_above, result.outlier_xyz, msg.header.stamp)
-        big_orange_threshold = (
-            self._cone_strategy.big_orange_height_threshold_m()
-        )
+        _publish_cloud(self._pub_above, result.above_ground_xyz, msg.header.stamp)
         cones = self._deskew(msg, result.cones)
-        cones_msg, orange_msg = self._cones_to_arrays(
+        cones_msg, orange_msg = cones_to_arrays(
             cones,
             stamp=msg.header.stamp,
             big_orange_threshold_m=big_orange_threshold,
@@ -466,7 +382,7 @@ class ConeDetectionNode(BaseLifecycleNode):
         # start-gate cones leave the ±60° H-FOV before the car passes them).
         self._pub_cones_orange.publish(orange_msg)
         if _has_subs(self._pub_markers) or _has_subs(self._pub_orange):
-            marker_array, orange_array = self._cones_to_markers(
+            marker_array, orange_array = cones_to_markers(
                 cones,
                 stamp=msg.header.stamp,
                 big_orange_threshold_m=big_orange_threshold,
@@ -529,15 +445,10 @@ class ConeDetectionNode(BaseLifecycleNode):
             for c, a, b in zip(cones, x0, y0)
         ]
 
-    def _accumulate_diagnostics(self, result: DetectionResult) -> None:
+    def _accumulate_diagnostics(self, result: DetectionResult, threshold: float) -> None:
         """Sum per-scan filter counters and emit one CONE_FILTER line per second."""
         per_scan = dict(result.debug_counters)
         n_left = n_right = n_centerline = n_bigorange = 0
-        threshold = (
-            self._cone_strategy.big_orange_height_threshold_m()
-            if self._cone_strategy is not None
-            else 0.45
-        )
         # Pre-compute per-side tallies. Detection does not colour-classify (SLAM
         # does downstream), but body-y sign matches SLAM's classify() — a proxy
         # for whether a cone-imbalance in the map (#189) starts here or downstream.
@@ -550,18 +461,14 @@ class ConeDetectionNode(BaseLifecycleNode):
                 n_right += 1
             else:
                 n_centerline += 1
-        per_scan["accepted_left"] = n_left
-        per_scan["accepted_right"] = n_right
-        per_scan["accepted_centerline"] = n_centerline
-        per_scan["accepted_bigorange"] = n_bigorange
-        result.debug_counters.update(
-            {
-                "accepted_left": n_left,
-                "accepted_right": n_right,
-                "accepted_centerline": n_centerline,
-                "accepted_bigorange": n_bigorange,
-            }
-        )
+        by_side = {
+            "accepted_left": n_left,
+            "accepted_right": n_right,
+            "accepted_centerline": n_centerline,
+            "accepted_bigorange": n_bigorange,
+        }
+        per_scan.update(by_side)
+        result.debug_counters.update(by_side)
 
         if per_scan.get("dbscan_guard_scans", 0):
             # Loud but throttled: this scan was NOT a cone scene (car facing
@@ -611,7 +518,7 @@ class ConeDetectionNode(BaseLifecycleNode):
     def _publish_perf(self, result: DetectionResult, total_ms: float) -> None:
         st = result.stage_timings
         _publish_f32(self._pub_latency_ms, total_ms)
-        _publish_f32(self._pub_ransac_ms, float(st.get("ransac_ms", 0.0)))
+        _publish_f32(self._pub_ground_ms, float(st.get("ground_ms", 0.0)))
         _publish_f32(self._pub_dbscan_ms, float(st.get("dbscan_ms", 0.0)))
         _publish_f32(self._pub_fit_ms, float(st.get("fit_ms", 0.0)))
         _publish_f32(self._pub_n_accepted, float(len(result.cones)))
@@ -622,118 +529,6 @@ class ConeDetectionNode(BaseLifecycleNode):
         _publish_f32(self._pub_n_far_dropped, float(dc.get("far_dropped", 0)))
         _publish_f32(self._pub_n_left, float(dc.get("accepted_left", 0)))
         _publish_f32(self._pub_n_right, float(dc.get("accepted_right", 0)))
-
-    @staticmethod
-    def _cones_to_arrays(
-        cones: list[ConeObservation],
-        *,
-        stamp: Time,
-        big_orange_threshold_m: float,
-    ) -> tuple[ConeArray, ConeArray]:
-        """Build the /cones_raw and /cones_orange ConeArrays (base_link).
-
-        Same cones and split as ``_cones_to_markers``. ``height`` and ``sigma_xy``
-        are the raw values (the markers clamp height to >= 0.1 m for display and
-        encode an unknown sigma as 0.1; here unknown is < 0).
-        """
-        out = []
-        for keep in (lambda c: True, lambda c: c.height_m > big_orange_threshold_m):
-            sel = [c for c in cones if keep(c)]
-            m = ConeArray()
-            m.header.frame_id = "base_link"
-            m.header.stamp = stamp
-            m.x = [float(c.x) for c in sel]
-            m.y = [float(c.y) for c in sel]
-            m.z = [0.0] * len(sel)
-            m.height = [float(c.height_m) for c in sel]
-            m.sigma_xy = [float(c.sigma_xy) if c.sigma_xy > 0.0 else -1.0 for c in sel]
-            m.id = [-1] * len(sel)
-            out.append(m)
-        return out[0], out[1]
-
-    @staticmethod
-    def _cones_to_markers(
-        cones: list[ConeObservation],
-        *,
-        stamp: Time,
-        big_orange_threshold_m: float,
-    ) -> tuple[MarkerArray, MarkerArray]:
-        """Build /Conos_raw and /Conos_Orange MarkerArrays from detections.
-
-        Both arrays start with a dedicated pose-less ``DELETEALL`` leader
-        so RViz/Foxglove drop the previous scan's cubes, followed by one
-        ``ADD`` marker per cone. The leader carries no cone: every
-        consumer (slam_node, control_node, path_planning) skips markers
-        with ``action == DELETEALL``, so a cone must never ride on it.
-        (Before this, the first *real* cone was emitted as the DELETEALL
-        marker itself and SLAM silently dropped one cone per scan.)
-        """
-        marker_array = MarkerArray()
-        orange_array = MarkerArray()
-
-        for arr in (marker_array, orange_array):
-            clear = Marker()
-            clear.header.frame_id = "base_link"
-            clear.header.stamp = stamp
-            clear.action = Marker.DELETEALL
-            arr.markers.append(clear)
-
-        marker_index = 0
-        orange_index = 0
-
-        for cone in cones:
-            is_big_orange = cone.height_m > big_orange_threshold_m
-
-            marker = Marker()
-            marker.pose.position.x = cone.x
-            marker.pose.position.y = cone.y
-            marker.pose.position.z = 0.0
-            # /Conos_raw is published in the body frame; SLAM transforms to map.
-            marker.header.frame_id = "base_link"
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            marker.header.stamp = stamp
-            # marker.scale carries per-cone metadata for downstream SLAM:
-            #   scale.x → σ_xy in metres (position uncertainty); sigma_xy < 0
-            #             means unknown — SLAM uses its range-only fallback
-            #   scale.y → reserved (visualization width; kept default)
-            #   scale.z → height_m (template apex or fitted height)
-            # SLAM reads scale.x in cone_graph_slam_node._observations_from_markers.
-            marker.scale.x = cone.sigma_xy if cone.sigma_xy > 0.0 else 0.1
-            marker.scale.y = 0.1
-            marker.scale.z = max(0.1, cone.height_m)
-            marker.color.a = 1.0
-            marker.color.r = 1.0
-            marker.color.g = 0.0
-            marker.color.b = 1.0
-            marker.pose.orientation.w = 1.0
-            marker.id = marker_index
-            marker_index += 1
-            marker_array.markers.append(marker)
-
-            if is_big_orange:
-                # Same pose, distinct marker list, orange colour for RViz.
-                orange = Marker()
-                orange.header.frame_id = "base_link"
-                orange.header.stamp = stamp
-                orange.type = Marker.CUBE
-                orange.action = Marker.ADD
-                orange.pose.position.x = cone.x
-                orange.pose.position.y = cone.y
-                orange.pose.position.z = 0.0
-                orange.pose.orientation.w = 1.0
-                orange.scale.x = 0.3
-                orange.scale.y = 0.3
-                orange.scale.z = max(0.1, cone.height_m)
-                orange.color.a = 1.0
-                orange.color.r = 1.0
-                orange.color.g = 0.5
-                orange.color.b = 0.0
-                orange.id = orange_index
-                orange_index += 1
-                orange_array.markers.append(orange)
-
-        return marker_array, orange_array
 
     # ------------------------------------------------------------------
     # Internal helpers

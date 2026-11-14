@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate reference.json from scans.npz (see golden.py).
 
-Runs the production config with both detector backends, requires them to agree,
+Runs the production config with all three detector backends, requires them to agree,
 and writes the result with the commit and library versions it came from.
 
     OPENBLAS_NUM_THREADS=1 NUMBA_NUM_THREADS=1 \
@@ -25,13 +25,15 @@ def main() -> int:
         return 1
     scans = golden.load_scans()
     py = golden.run(golden.production_config("python"), scans)
-    fu = golden.run(golden.production_config("fused"), scans)
-    for k, (a, b) in enumerate(zip(py, fu)):
-        if a["counters"] != b["counters"]:
-            print(f"scan {k}: counters differ\n python {a['counters']}\n fused  {b['counters']}")
-            return 1
-        np.testing.assert_allclose(b["plane"], a["plane"], rtol=0, atol=1e-9)
-        np.testing.assert_allclose(b["cones"], a["cones"], rtol=0, atol=1e-6)
+    for backend in ("fused", "cpp"):
+        other = golden.run(golden.production_config(backend), scans)
+        for k, (a, b) in enumerate(zip(py, other)):
+            if a["counters"] != b["counters"]:
+                print(f"scan {k}: counters differ\n python {a['counters']}\n"
+                      f" {backend} {b['counters']}")
+                return 1
+            np.testing.assert_allclose(b["plane"], a["plane"], rtol=0, atol=1e-9)
+            np.testing.assert_allclose(b["cones"], a["cones"], rtol=0, atol=1e-6)
     import numba
 
     commit = subprocess.run(
@@ -49,7 +51,7 @@ def main() -> int:
         json.dump({"meta": meta, "scans": py}, fh, indent=1)
         fh.write("\n")
     n = sum(len(s["cones"]) for s in py)
-    print(f"wrote {golden.REFERENCE}: {len(py)} scans, {n} cones, python == fused")
+    print(f"wrote {golden.REFERENCE}: {len(py)} scans, {n} cones, python == fused == cpp")
     return 0
 
 

@@ -161,43 +161,38 @@ template Cloud crop_promote<double>(const double*, std::size_t, double, double);
 Plane ransac_plane(const Cloud& xyz, double prob, double threshold, int64_t max_iter,
                    int64_t n_sub_max, const std::vector<double>& warm, NumbaMt& rng,
                    std::vector<uint8_t>& outliers) {
+  // = ground.ransac.ransac_ground_mask: same draws in the same order, same tests.
   constexpr int m = 3;
   const int64_t n = static_cast<int64_t>(xyz.size() / 3);
-  std::vector<double> sx, sy, sz;
-  int64_t ns;
-  if (n > n_sub_max) {
-    const auto sub = sample_without_replacement(rng, n, n_sub_max);
-    ns = n_sub_max;
-    sx.resize(ns);
-    sy.resize(ns);
-    sz.resize(ns);
-    for (int64_t i = 0; i < ns; ++i) {
-      const int64_t j = sub[i];
-      sx[i] = xyz[3 * j];
-      sy[i] = xyz[3 * j + 1];
-      sz[i] = xyz[3 * j + 2];
+  int64_t ns = n_sub_max;
+  if (ns <= 0 || ns > n) ns = n;
+  std::vector<double> sx(ns), sy(ns), sz(ns);
+  if (ns < n) {
+    for (int64_t s = 0; s < ns; ++s) {  // independent draws, with replacement
+      const int64_t i = rng.randint(0, n);
+      sx[s] = xyz[3 * i];
+      sy[s] = xyz[3 * i + 1];
+      sz[s] = xyz[3 * i + 2];
     }
   } else {
-    ns = n;
-    sx.resize(ns);
-    sy.resize(ns);
-    sz.resize(ns);
-    for (int64_t i = 0; i < ns; ++i) {
-      sx[i] = xyz[3 * i];
-      sy[i] = xyz[3 * i + 1];
-      sz[i] = xyz[3 * i + 2];
+    for (int64_t s = 0; s < n; ++s) {
+      sx[s] = xyz[3 * s];
+      sy[s] = xyz[3 * s + 1];
+      sz[s] = xyz[3 * s + 2];
     }
   }
-  auto count = [&](double c0, double c1, double c2) {
-    int64_t s = 0;
-    for (int64_t i = 0; i < ns; ++i)
-      if (std::abs(c0 + c1 * sx[i] + c2 * sy[i] - sz[i]) < threshold) ++s;
-    return s;
+  // _support_3d: vertical distance below threshold, minus m
+  auto support3d = [&](double c0, double c1, double c2, double c3) {
+    const double lim = threshold * std::abs(c3);
+    int64_t cnt = 0;
+    for (int64_t s = 0; s < ns; ++s)
+      if (std::abs(c0 + c1 * sx[s] + c2 * sy[s] + c3 * sz[s]) < lim) ++cnt;
+    return cnt - m;
   };
   double k = static_cast<double>(max_iter);
   int64_t support = 0;
   Plane best;
-  auto refine = [&]() {
+  auto budget = [&]() {  // _iteration_budget
     const double r = static_cast<double>(support) / static_cast<double>(ns);
     if (0.0 < r && r < 1.0) {
       const double kn = std::log(1 - prob) / std::log(1 - cube(r));
@@ -205,56 +200,48 @@ Plane ransac_plane(const Cloud& xyz, double prob, double threshold, int64_t max_
     }
   };
   if (warm.size() == 4 && std::abs(warm[3]) > 1e-12) {
-    const double c0 = warm[0] / -warm[3], c1 = warm[1] / -warm[3], c2 = warm[2] / -warm[3];
-    const int64_t s = count(c0, c1, c2) - m;
-    if (s > support) {
-      support = s;
+    const int64_t cnt = support3d(warm[0], warm[1], warm[2], warm[3]);
+    if (cnt > support) {
+      support = cnt;
       best.coefs = {warm[0], warm[1], warm[2], warm[3]};
-      refine();
+      budget();
     }
   }
-  int64_t idx[m];
-  int64_t it = 0;
-  while (static_cast<double>(it) < k && it < max_iter) {
-    for (int jj = 0; jj < m; ++jj) {
-      while (true) {
-        const int64_t cand = rng.randint(0, n);
-        bool dup = false;
-        for (int kk = 0; kk < jj; ++kk)
-          if (idx[kk] == cand) {
-            dup = true;
-            break;
-          }
-        if (!dup) {
-          idx[jj] = cand;
-          break;
-        }
-      }
+  int64_t iters = 0;
+  while (static_cast<double>(iters) < k && iters < max_iter) {
+    ++iters;
+    // Anchors come from the full cloud; the subsample only scores them.
+    const int64_t i0 = rng.randint(0, n);
+    int64_t i1 = rng.randint(0, n);
+    while (i1 == i0) i1 = rng.randint(0, n);
+    int64_t i2 = rng.randint(0, n);
+    while (i2 == i0 || i2 == i1) i2 = rng.randint(0, n);
+    const double px = xyz[3 * i0], py = xyz[3 * i0 + 1], pz = xyz[3 * i0 + 2];
+    const double ax = xyz[3 * i1] - px, ay = xyz[3 * i1 + 1] - py, az = xyz[3 * i1 + 2] - pz;
+    const double bx = xyz[3 * i2] - px, by = xyz[3 * i2 + 1] - py, bz = xyz[3 * i2 + 2] - pz;
+    double nx = ay * bz - az * by;
+    double ny = az * bx - ax * bz;
+    double nz = ax * by - ay * bx;
+    const double norm = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (!(norm > 0.0) || !std::isfinite(norm) || nz == 0.0) continue;
+    nx /= norm;
+    ny /= norm;
+    nz /= norm;
+    const double c0 = -(nx * px + ny * py + nz * pz);
+    const int64_t cnt = support3d(c0, nx, ny, nz);
+    if (cnt > support) {
+      support = cnt;
+      best.coefs = {c0, nx, ny, nz};
+      budget();
     }
-    const double p0x = xyz[3 * idx[0]], p0y = xyz[3 * idx[0] + 1], p0z = xyz[3 * idx[0] + 2];
-    const double v1x = xyz[3 * idx[1]] - p0x, v1y = xyz[3 * idx[1] + 1] - p0y,
-                 v1z = xyz[3 * idx[1] + 2] - p0z;
-    const double v2x = xyz[3 * idx[2]] - p0x, v2y = xyz[3 * idx[2] + 1] - p0y,
-                 v2z = xyz[3 * idx[2] + 2] - p0z;
-    double nx = v1y * v2z - v1z * v2y;
-    double ny = v1z * v2x - v1x * v2z;
-    double nz = v1x * v2y - v1y * v2x;
-    const double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
-    nx /= nn;
-    ny /= nn;
-    nz /= nn;
-    const double bias = -(nx * p0x + ny * p0y + nz * p0z);
-    const int64_t s = count(bias / -nz, nx / -nz, ny / -nz) - m;
-    if (s > support) {
-      support = s;
-      best.coefs = {bias, nx, ny, nz};
-      refine();
-    }
-    ++it;
   }
   if (best.coefs[3] < 0)
     for (auto& c : best.coefs) c = -c;
-  outliers = plane_outliers(xyz, best, threshold);
+  const double c0 = best.coefs[0], c1 = best.coefs[1], c2 = best.coefs[2], c3 = best.coefs[3];
+  const double lim = threshold * std::abs(c3);
+  outliers.assign(n, 0);
+  for (int64_t i = 0; i < n; ++i)
+    outliers[i] = !(std::abs(c0 + c1 * xyz[3 * i] + c2 * xyz[3 * i + 1] + c3 * xyz[3 * i + 2]) < lim);
   return best;
 }
 

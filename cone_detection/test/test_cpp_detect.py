@@ -14,11 +14,14 @@ import pytest
 core = pytest.importorskip("cone_detection_core")
 
 from cone_detection import cpp_backend, fused  # noqa: E402
-from cone_detection.clustering import _grid_components  # noqa: E402
-from cone_detection.cone_detection import ConeDetectionConfig, RealtimeConeDetector  # noqa: E402
-from cone_detection.ransac import sample_without_replacement  # noqa: E402
-from cone_detection.ground_methods import ray_slope_kernel  # noqa: E402
-from test_fused_detect import _bent_scene, _scene  # noqa: E402
+from cone_detection.clustering.dbscan import _grid_components  # noqa: E402
+from cone_detection.detector import RealtimeConeDetector  # noqa: E402
+from cone_detection.fused_ground import ray_slope_kernel  # noqa: E402
+from cone_detection.ground.ransac import (  # noqa: E402
+    ransac_ground_mask,
+    sample_without_replacement,
+)
+from test_fused_detect import ConeDetectionConfig, _bent_scene, _record, _scene  # noqa: E402
 
 RNG = np.random.default_rng(41)
 
@@ -32,7 +35,7 @@ def _numba_sample(seed, n, k):
 @numba.njit
 def _numba_ransac(seed, xyz, prob, thr, max_iter, n_sub, warm):
     np.random.seed(seed)
-    return fused.ransac_plane(xyz, prob, thr, max_iter, n_sub, warm)
+    return ransac_ground_mask(xyz, prob, thr, max_iter, n_sub, warm)
 
 
 def _run(cfg, scans, viz=True):
@@ -40,17 +43,11 @@ def _run(cfg, scans, viz=True):
     out = []
     for scan in scans:
         dc, st = {}, {}
-        cones = det.detect(scan, debug_counters=dc, stage_timings=st, viz_full_cloud=viz)
-        out.append(
-            dict(
-                cones=np.array(cones, dtype=float).reshape(-1, 4),
-                counters=dc,
-                stages={k: v for k, v in st.items() if not k.endswith("_ms")},
-                outliers=det.last_outlier_xyz.copy(),
-                rotated=det.last_rotated_xyz.copy(),
-                plane=None if det._prev_plane is None else np.array(det._prev_plane, dtype=float),
-            )
-        )
+        res = det.detect(scan, debug_counters=dc, stage_timings=st, keep_scan=viz)
+        rec = _record(det, res, dc, st)
+        if not viz:
+            rec.pop("rotated")
+        out.append(rec)
     return det, out
 
 
@@ -67,7 +64,8 @@ def _assert_same(cfg, scans, viz=True):
             np.testing.assert_allclose(b["plane"], a["plane"], rtol=0, atol=1e-12)
         np.testing.assert_allclose(b["cones"], a["cones"], rtol=0, atol=1e-9)
         np.testing.assert_allclose(b["outliers"], a["outliers"], rtol=0, atol=1e-5)
-        np.testing.assert_allclose(b["rotated"], a["rotated"], rtol=0, atol=1e-5)
+        if "rotated" in a and "rotated" in b:
+            np.testing.assert_allclose(b["rotated"], a["rotated"], rtol=0, atol=1e-5)
     return fu
 
 
@@ -168,8 +166,8 @@ def test_veto_and_voxel_match_numba():
 def test_fit_clusters_matches_numba(scans):
     cfg = ConeDetectionConfig()
     det = RealtimeConeDetector(dataclasses.replace(cfg, detector_backend="fused"))
-    det.detect(scans[0])
-    pts = np.ascontiguousarray(det.last_outlier_xyz, dtype=np.float64)
+    res = det.detect(scans[0])
+    pts = np.ascontiguousarray(res.segmentation.above_ground_xyz, dtype=np.float64)
     labels = _grid_components(pts, cfg.dbscan_eps)
     p = fused.fit_params(cfg)
     rows_nb, cnt_nb = fused.fit_clusters(pts, labels, p)
@@ -181,11 +179,6 @@ def test_fit_clusters_matches_numba(scans):
 # --------------------------------------------------------------------------
 # ray_slope ground
 # --------------------------------------------------------------------------
-def test_cpp_equals_fused_ray_slope(scans):
-    fu = _assert_same(ConeDetectionConfig(ground_method="ray_slope"), scans + [_bent_scene()])
-    assert all(r["counters"]["accepted"] >= 8 for r in fu)
-
-
 def test_ray_slope_kernel_matches_numba(scans):
     cfg = ConeDetectionConfig()
     for scan in scans + [_bent_scene()]:

@@ -66,17 +66,17 @@ def production_config(detector_backend: str | None = None):
 
 def run(cfg, scans) -> list[dict]:
     """Detect every scan in order with one detector, as the node does."""
-    from cone_detection.cone_detection import RealtimeConeDetector
+    from cone_detection.detector import RealtimeConeDetector
 
     det = RealtimeConeDetector(cfg)
     out = []
     for scan in scans:
         counters: dict = {}
-        cones = det.detect(scan, debug_counters=counters)
+        res = det.detect(scan, debug_counters=counters)
         out.append(
             {
-                "cones": np.asarray(cones, dtype=float).reshape(-1, 4).tolist(),
-                "plane": np.asarray(det._prev_plane, dtype=float).tolist(),
+                "cones": np.asarray(res.cones, dtype=float).reshape(-1, 4).tolist(),
+                "plane": np.asarray(det._ransac()._prev_plane, dtype=float).tolist(),
                 "counters": {
                     k: (int(v) if float(v).is_integer() else float(v))
                     for k, v in sorted(counters.items())

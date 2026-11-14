@@ -12,7 +12,7 @@ pytest.importorskip("dv_msgs")
 from builtin_interfaces.msg import Time  # noqa: E402
 from visualization_msgs.msg import Marker  # noqa: E402
 
-from cone_detection.cone_detection_node import ConeDetectionNode  # noqa: E402
+from cone_detection.conversions import cones_to_arrays, cones_to_markers  # noqa: E402
 from cone_detection.strategies.cone_detection_strategy import ConeObservation  # noqa: E402
 
 CONES = [
@@ -24,8 +24,8 @@ CONES = [
 
 def test_arrays_match_markers():
     stamp = Time(sec=7, nanosec=5)
-    arr, orange = ConeDetectionNode._cones_to_arrays(CONES, stamp=stamp, big_orange_threshold_m=0.45)
-    ma, mo = ConeDetectionNode._cones_to_markers(CONES, stamp=stamp, big_orange_threshold_m=0.45)
+    arr, orange = cones_to_arrays(CONES, stamp=stamp, big_orange_threshold_m=0.45)
+    ma, mo = cones_to_markers(CONES, stamp=stamp, big_orange_threshold_m=0.45)
     adds = [m for m in ma.markers if m.action == Marker.ADD]
     assert list(arr.x) == pytest.approx([m.pose.position.x for m in adds])
     assert list(arr.y) == pytest.approx([m.pose.position.y for m in adds])
@@ -39,6 +39,6 @@ def test_arrays_match_markers():
 
 def test_empty_scan_still_stamped():
     stamp = Time(sec=9)
-    arr, orange = ConeDetectionNode._cones_to_arrays([], stamp=stamp, big_orange_threshold_m=0.45)
+    arr, orange = cones_to_arrays([], stamp=stamp, big_orange_threshold_m=0.45)
     assert len(arr.x) == 0 and len(orange.x) == 0
     assert arr.header.stamp == stamp and orange.header.stamp == stamp

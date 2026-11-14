@@ -469,7 +469,7 @@
       "title": "Detection stages (ms)",
       "paths": [
         {
-          "value": "/cone_detection/ransac_ms.data",
+          "value": "/cone_detection/ground_ms.data",
           "enabled": true,
           "timestampMethod": "receiveTime",
           "label": "ground RANSAC"

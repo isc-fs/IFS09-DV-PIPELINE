@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("rclpy")
 from rclpy.lifecycle import TransitionCallbackReturn  # noqa: E402
 
-from cone_detection import cone_detection_node as cdn  # noqa: E402
+from cone_detection import node as cdn  # noqa: E402
 from node_base.base_lifecycle_node import BaseLifecycleNode  # noqa: E402
 
 
