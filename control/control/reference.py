@@ -43,12 +43,12 @@ class ReferenceTrajectory:
                 kappa: List[float] | None = None) -> "ReferenceTrajectory":
         """Build from raw waypoints — derives yaw, curvature, arc length.
 
-        If `kappa` is provided (e.g. FaSTTUBe's analytical B-spline κ
+        If `kappa` is provided (e.g. the planner's circle-fit κ
         smuggled through `pose.position.z` from path_planning), it's
         used verbatim instead of the controller-side finite difference.
         The finite-difference fallback is noisy on tight bends because
-        it's computed from 3 consecutive 0.5 m-spaced points; analytical
-        κ from the planner's spline is much smoother and lets
+        it's computed from 3 consecutive 0.5 m-spaced points; the
+        planner's κ (circle fit over its spline) is much smoother and lets
         `_max_curvature_ahead` see a corner well before the car reaches
         it. (#260 follow-up)
         """

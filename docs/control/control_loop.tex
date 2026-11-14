@@ -227,8 +227,15 @@ s_{i+1} = s_i + \lVert p_{i+1} - p_i \rVert, \quad
 \label{eq:ref}
 \end{equation}
 with $\psi_{N-1} = \psi_{N-2}$ and the end curvatures copied from their neighbours. When
-the planner sends its own curvature (the B-spline $\kappa$ in \texttt{pose.position.z})
+the planner sends its own curvature (a circle fit over its path spline, in \texttt{pose.position.z})
 and any value exceeds $10^{-6}$, that is used instead of the finite difference.
+Measured against the true track over HIL v10, that curvature is within 2\,\% of the
+path's own geometry, but the path itself was flatter than the track in tight corners: the
+library's centreline spline smoothing (0.2) gave 83\,\% of the true curvature at
+$R = $ 4--7\,m and 94\,\% at 7--10\,m. Sampling the path with 80 or 120 points instead of
+40 changed nothing. Smoothing 0.05 (\texttt{path\_planning/fasttube\_adapter.py}) gives
+91\,\% and 100\,\%, and lowers the error 4--12\,m ahead from 0.0184 to 0.0148\,m$^{-1}$
+RMS, at no measurable planning cost.
 
 %=====================================================================
 \section{Lateral control}

@@ -117,7 +117,7 @@ class ControlNode(BaseLifecycleNode):
         self._latest_path_xs: list[float] = []
         self._latest_path_ys: list[float] = []
         # Per-pose curvature from path_planning, smuggled through
-        # `pose.position.z` (FaSTTUBe analytical κ; see path_planning's
+        # `pose.position.z` (the planner's circle-fit κ; see path_planning's
         # _pose_stamped). Empty when no path has arrived yet; the
         # ReferenceTrajectory builder falls back to its own finite-
         # difference κ when this list is empty or all-zero.
@@ -630,7 +630,7 @@ class ControlNode(BaseLifecycleNode):
         self._latest_path_xs = [p.pose.position.x for p in msg.poses]
         self._latest_path_ys = [p.pose.position.y for p in msg.poses]
         # Side-channel: pose.position.z carries the planner's per-pose
-        # curvature (FaSTTUBe analytical κ). See path_planning's
+        # curvature (circle fit over its path spline). See path_planning's
         # _pose_stamped for the encoding rationale.
         self._latest_path_kappas = [p.pose.position.z for p in msg.poses]
 

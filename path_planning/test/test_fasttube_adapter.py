@@ -276,3 +276,41 @@ def test_late_compile_logger_reports_and_closes() -> None:
     handle.close()
     _fresh(np.zeros((2, 2)))
     assert len(late) == 1 and "_fresh" in late[0]
+
+
+def _corner_track(radius: float, straight: float = 6.0, spacing: float = 3.0,
+                  half_width: float = 1.5) -> List[Cone]:
+    """A straight along +X, then a 180° left turn of centreline radius
+    `radius`, cones every `spacing` m of centreline (deterministic jitter)."""
+    rng = np.random.default_rng(seed=0xC0BE)
+    cones: List[Cone] = []
+    s = 1.0
+    while s < straight + math.pi * radius:
+        if s < straight:
+            x, y, h = s, 0.0, 0.0
+        else:
+            a = (s - straight) / radius
+            x, y, h = straight + radius * math.sin(a), radius - radius * math.cos(a), a
+        nx, ny = -math.sin(h), math.cos(h)
+        for side in (+1, -1):
+            cones.append(Cone(x=x + side * half_width * nx + float(rng.uniform(-0.05, 0.05)),
+                              y=y + side * half_width * ny + float(rng.uniform(-0.05, 0.05))))
+        s += spacing
+    return cones
+
+
+@pytest.mark.parametrize("radius", [5.0, 8.0])
+def test_corner_curvature_is_not_flattened(radius: float) -> None:
+    """The library's default centreline smoothing (0.2) rounded tight corners:
+    replaying HIL v10, the published curvature was 83 % of the track's at
+    R 4-7 m. _CENTRELINE_SMOOTHING keeps it within ~10 %."""
+    path, _ = FasttubeAdapter().plan(_corner_track(radius), _car_at_origin())
+    assert len(path) > 10
+    xy = np.array([(p.x, p.y) for p in path])
+    k = np.array([p.curvature for p in path])
+    # points well inside the arc: angle 30°..150° around its centre
+    ang = np.degrees(np.arctan2(xy[:, 0] - 6.0, radius - xy[:, 1]))
+    inside = (ang > 30) & (ang < 150)
+    assert inside.sum() >= 3, "path too short to reach the arc"
+    ratio = float(np.median(k[inside])) * radius
+    assert 0.88 < ratio < 1.12, f"published curvature {ratio:.0%} of the corner's"

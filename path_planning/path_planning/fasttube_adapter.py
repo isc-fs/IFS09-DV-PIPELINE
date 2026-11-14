@@ -63,6 +63,17 @@ _CULL_RANGE_M = 25.0
 # starved.
 _MAX_PATH_ARC_M = 12.0
 
+# Smoothing of the library's centreline spline (splprep `s`, its default
+# 0.2). Replaying HIL v10's planner inputs against the true track: at 0.2 the
+# path is flatter than the track in tight corners (curvature 83 % of true at
+# R 4-7 m, 94 % at 7-10 m) and the controller brakes too late for them. 0.05
+# gives 91 % and 100 %, keeps the path closer to the centreline (0.06 m from
+# it, was 0.10) and lowers the curvature error 4-12 m ahead (RMS 0.0148 1/m,
+# was 0.0184); 0.01-0.03 follow cone noise. Sampling more points (80, 120
+# instead of 40) changed nothing: the smoothing, not the sampling, rounds the
+# corners. See docs/control/control_loop.tex.
+_CENTRELINE_SMOOTHING = 0.05
+
 
 @dataclass
 class PlanDebug:
@@ -103,6 +114,8 @@ class FasttubeAdapter:
         # (see _cones_to_arrays — every cone is packed into the
         # UNKNOWN slot).
         self._planner = PathPlanner(mission)
+        # Read at every fit, so setting it here is enough (no library change).
+        self._planner.pathing.spline_fitter_factory.smoothing = _CENTRELINE_SMOOTHING
         self._mission = mission
         # Rate-limited error logging — papalotis can raise on degenerate
         # cone fields (very few cones, all same colour, malformed
@@ -210,9 +223,10 @@ class FasttubeAdapter:
             within_cap = np.zeros_like(within_cap)
             within_cap[:n_kept] = True
         xy = np.asarray(path[within_cap, 1:3], dtype=np.float64)
-        # Curvature is the 4th column. FaSTTUBe computes it analytically
-        # from the path B-spline, which is much smoother than the
-        # finite-difference recompute the controller would do otherwise.
+        # Curvature is the 4th column. The library resamples its path spline
+        # and fits a circle over a sliding window of ~6 m, then averages it:
+        # much smoother than the finite-difference recompute the controller
+        # would do otherwise (within 2 % of the path's own geometry).
         # We pass it through so the longitudinal controller can see
         # corners earlier and more reliably.
         kappa = np.asarray(path[within_cap, 3], dtype=np.float64)
