@@ -34,14 +34,13 @@ import rclpy
 from node_base.base_lifecycle_node import BaseLifecycleNode
 from rclpy.lifecycle import TransitionCallbackReturn, State as LifecycleState
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
+from rclpy.qos_event import PublisherEventCallbacks, SubscriptionEventCallbacks
 
 from fs_msgs.msg import ControlCommand
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, Float32
 from visualization_msgs.msg import Marker, MarkerArray
 from dv_msgs.msg import ConeArray
-from tf2_ros.buffer import Buffer
-from tf2_ros.transform_listener import TransformListener
 from transforms3d.euler import quat2euler
 
 from control.state import VehicleState
@@ -75,6 +74,21 @@ class ControlNode(BaseLifecycleNode):
 
     NODE_NAME = "control_node"
     PUBLISH_RATE_HZ = 40.0
+
+    # No default QoS-event handlers on this node's publishers and subscriptions.
+    # rclpy polls one "incompatible QoS" waitable per publisher and subscription
+    # on every executor wakeup (~255/s here); dropping them cut control's CPU by
+    # about a quarter on the RK3588 (docs/arm_optimization/validation.md). The
+    # cost: no warning at discovery when a peer offers incompatible QoS; check
+    # with `ros2 topic info -v` instead.
+    def create_publisher(self, *args, **kwargs):
+        kwargs.setdefault("event_callbacks", PublisherEventCallbacks(use_default_callbacks=False))
+        return super().create_publisher(*args, **kwargs)
+
+    def create_subscription(self, *args, **kwargs):
+        kwargs.setdefault(
+            "event_callbacks", SubscriptionEventCallbacks(use_default_callbacks=False))
+        return super().create_subscription(*args, **kwargs)
 
     def __init__(self) -> None:
         super().__init__(self.NODE_NAME)
@@ -136,8 +150,6 @@ class ControlNode(BaseLifecycleNode):
         self._tick_count: int = 0
 
         # I/O handles, set in on_configure / on_activate.
-        self._tf_buffer: Optional[Buffer] = None
-        self._tf_listener: Optional[TransformListener] = None
         self._cmd_pub = None
         # Post-#384: emergency requests go onto a latched Bool topic
         # that mission_control_node subscribes to and surfaces via
@@ -201,18 +213,10 @@ class ControlNode(BaseLifecycleNode):
         self._latency_pub = self.create_lifecycle_publisher(
             Float32, "/control/latency_ms", 10)
 
-        # TF listener — post-#382 sim_supervisor publishes
-        # odom→base_link (100 Hz dead-reckoning) and slam_node
-        # publishes map→odom (drift correction). The chain
-        # map→odom→base_link gives the leaf-pose used for waypoint
-        # projection.
-        self._tf_buffer = Buffer()
-        # spin_thread=False: this process already rclpy.spin()s the node.
-        # Humble's TransformListener default (True) adds the same node to a
-        # second executor, so every /tf sample is inserted twice and the
-        # second hit logs TF_OLD_DATA (equal timestamps are "from the past").
-        self._tf_listener = TransformListener(
-            self._tf_buffer, self, spin_thread=False)
+        # No TF listener: the pose comes from /slam/pose and the twist from
+        # /odom. A listener here took every /tf message (~70 Hz) for a buffer
+        # nothing read, and on_cleanup never destroyed its subscriptions, so
+        # each mission added another one.
 
         return TransitionCallbackReturn.SUCCESS
 
@@ -343,8 +347,6 @@ class ControlNode(BaseLifecycleNode):
         self._v_set_pub = None
         self._kappa_max_pub = None
         self._latency_pub = None
-        self._tf_listener = None
-        self._tf_buffer = None
         self._drive = None
         return super().on_cleanup(state)
 

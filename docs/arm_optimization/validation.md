@@ -675,6 +675,53 @@ setup:
 Trackdrive took 2.9 % longer in total and autocross 11 % less. With one session each, both
 are within run-to-run noise.
 
+### Control on core 7: it is the rclpy executor, not the controller
+
+After the move, control used 71 % of core 7 in HIL. To see why, control ran alone on core 7
+on the Pi, fed by a replay of the HIL bag (`/clock`, `/tf`, `/odom`, `/slam/pose`, `/Path`,
+`/cones_orange`), with py-spy at 200 Hz for 60 s:
+
+| where control's time goes (one mission) | share of samples |
+|---|---|
+| rclpy rebuilding the wait set on every wakeup | 62 % |
+| blocked in `wait` (idle) | 19 % |
+| message deserialisation | 10 % |
+| the 40 Hz tick, publishing included | 4 % |
+| the control law (pure pursuit, speed PI, bicycle model) | **0.7 %** |
+
+Control wakes about 255 times a second: the 40 Hz tick, `/clock` 59 Hz (sim only), `/tf`
+68 Hz, `/odom` 58 Hz and three 10 Hz inputs. Each wakeup costs about 1.6 ms of Python executor
+bookkeeping, which scales with the node's entity count (subscriptions, timers, lifecycle
+and parameter services, and one QoS-event waitable per publisher and subscription).
+
+Two findings:
+
+1. **An unused TF listener that leaked.** Control created a TF listener in `on_configure` and
+   never looked anything up. `on_cleanup` dropped the reference without destroying its `/tf`
+   subscriptions, so every mission added one more. After 10 missions control decoded each
+   `/tf` message 10 times. The listener is removed.
+2. **QoS-event waitables.** Humble gives every publisher and subscription a default
+   "incompatible QoS" event handler, which the executor polls on every wakeup. Control now
+   creates its publishers and subscriptions without them (`use_default_callbacks=False`),
+   which saves about 9 %. The cost: no warning at discovery when a peer offers incompatible
+   QoS; check with `ros2 topic info -v` instead.
+
+```mermaid
+xychart-beta
+    title "Control CPU alone on core 7 after 10 missions (% of core, bag replay)"
+    x-axis ["before", "TF listener removed", "+ no QoS-event waitables"]
+    y-axis "% of core" 0 --> 100
+    bar [55.7, 40.5, 36.9]
+    line [100, 100, 100]
+```
+
+"Before" is one run; the other two are the mean of three (39–43 % and 34–40 %). Runs vary
+by about ±3 points, so read the second step as roughly 9 %.
+
+On the car there is no `/clock`, which removes another 59 wakeups a second. The control law
+itself is negligible, so porting control to C++ is not worth it: control moves to the uDV's
+STM32H7 later, and the Pi side then only forwards the path and pose.
+
 ### Open
 
 1. ~~**Scan drops cause the watchdog trips.**~~ Fixed above (IP reassembly on the Pi). Every trip is `/slam/pose` silent for 0.62–0.63 s:
@@ -687,4 +734,5 @@ are within run-to-run noise.
 2. ~~Core 5 saturated outside SLAM's algorithms.~~ Fixed above: 72 → 30 % on the car bag.
    ~~Core 6 still is.~~ Fixed above: flat cone arrays and control on its own core take core 6
    from 99 to 67 % and planning latency from 42 to 20 ms p50. **Core 7 is at 96 % now**
-   (control, odometry filter, network interrupts); profile control next.
+   (control, odometry filter, network interrupts). Profiled: it is rclpy's executor, and an
+   unused TF listener that leaked a `/tf` subscription per mission (removed, above).
