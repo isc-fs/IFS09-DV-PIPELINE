@@ -1,9 +1,8 @@
 """The perception pipeline's tunable settings (``ConeDetectionConfig``).
 
-Kept apart from ``cone_detection.py`` so it imports nothing heavy: the ROS node declares one
-parameter per field at construction, before ``~/setup``, and must not pull in sklearn / numba
-then (mode_manager's service wait times out on a cold start). ``cone_detection.cone_detection``
-re-exports both names, so existing imports keep working.
+Kept in its own module so it imports nothing heavy: the ROS node declares one parameter per
+field at construction, before ``~/setup``, and must not pull in sklearn / numba then
+(mode_manager's service wait times out on a cold start).
 
 Each field is a ROS parameter of ``cone_detection_node`` with the same name, type and default;
 the values that run are in ``bringup/config/params.yaml``.
@@ -33,12 +32,17 @@ class ConeDetectionConfig:
     # Coarse cluster-shape pre-filter (meters).
     cluster_height_min_m: float = 0.02
     cluster_height_max_m: float = 0.55
+    # Drop a cluster whose highest return is less than this above the floor (m).
+    # A small cone is 0.325 m tall, so its top returns sit well above ~0.2 m;
+    # curb and wall-foot fragments left by the cleaner ground methods top out
+    # at ~0.10-0.12 m and otherwise pass the height-extent gate above. 0 disables.
+    cluster_top_min_m: float = 0.0
 
     # Range cutoff (m): beyond this, drop as too sparse / unreliable.
     range_gate_max_m: float = 20.0
 
     # Input range pre-crop (m): drop points beyond this horizontal radius
-    # BEFORE RANSAC + DBSCAN. Everything past range_gate_max_m is discarded
+    # BEFORE ground removal + DBSCAN. Everything past range_gate_max_m is discarded
     # downstream anyway (far_dropped), so cropping here is behavior-preserving
     # (radius > range_gate_max_m + cone extent) and removes most of the ~174k
     # ATX returns (far ground) before the O(n) clustering — the dominant cost.
@@ -50,7 +54,7 @@ class ConeDetectionConfig:
     # return" as (0, 0, 0): ~14% of a real scan (24.6k of 174k) sat at the
     # sensor origin. After the ground shift those land ~1 m above the floor,
     # where the tall-column veto silently discarded them, and they still cost
-    # RANSAC time. 0.1 m is far inside the sensor's blind zone, so no real
+    # ground-removal time. 0.1 m is far inside the sensor's blind zone, so no real
     # return is lost. Set to 0 to disable.
     input_min_range_m: float = 0.1
 
@@ -68,20 +72,26 @@ class ConeDetectionConfig:
     # Minimum number of returns in a DBSCAN cluster before floor culling.
     min_cluster_points: int = 3
 
-    # Ground-removal method (see ground_methods.py): ransac | ransac_zones | ransac_rings | gpf | grid_resid |
-    # ray_slope | czm. ransac is the production default; the others are being
-    # benchmarked. ransac_threshold below is the ground distance for all of them.
+    # Ground-removal method (see the ground.methods package): ransac | ransac_zones | ransac_rings | gpf | grid_resid |
+    # ray_slope | czm | height_jump | linefit | range_image | groundgrid | pmf | gp_insac | mrf | csf |
+    # patchworkpp. ransac is the production default; the others are being benchmarked
+    # (csf and patchworkpp need optional packages). ground_threshold_m below is the
+    # ground distance for all of them.
     ground_method: str = "ransac"
 
-    # RANSAC plane inliers
+    # Ground removal: a return within this distance (m) of the ground is ground,
+    # for every method. 0 means a MAD-based threshold for ransac only.
+    ground_threshold_m: float = 0.05
+    # RANSAC-only knobs (the ransac* methods): success probability and the cap
+    # on the subsample scored per iteration.
     ransac_prob: float = 0.9999
-    ransac_threshold: float = 0.05
+    ransac_iter_subsample_max: int = 5000
 
     # DBSCAN on rotated above-ground cloud
     dbscan_eps: float = 0.3
     dbscan_min_samples: int = 2
 
-    # Clustering implementation: "sklearn" = sklearn DBSCAN; "grid" = clustering.grid_dbscan,
+    # Clustering implementation: "sklearn" = sklearn DBSCAN; "grid" = clustering.dbscan.grid_dbscan,
     # an exact equivalent for dbscan_min_samples == 2 (any other value falls back to
     # sklearn) that skips sklearn's per-point neighbour lists; "pypi" = the PyPI `dbscan`
     # package (parallel C++, not guaranteed identical on points at ~eps), which falls back
@@ -95,7 +105,7 @@ class ConeDetectionConfig:
     # O(N × neighbours-within-eps), i.e. quadratic in point density. A scan
     # whose above-ground cloud is both large and dense — tire walls, car
     # off-track facing terrain / an object at close range, or a mis-fitted
-    # ground plane that turns the ground itself into "outliers" — blows
+    # ground plane that turns the ground itself into "non-ground" — blows
     # straight through the container: measured 90k pts @ 20k pts/m² → 4.7 GB
     # peak, 11 s, ~2.6 GB never returned to the OS. Two such scans OOM-kill
     # the node (8 GB limit) after stalling SLAM for seconds. A cone scene is

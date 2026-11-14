@@ -12,13 +12,10 @@ import math
 
 import numpy as np
 
-from cone_detection.cone_detection import (
-    ConeDetectionConfig,
-    RealtimeConeDetector,
-    _bound_dbscan_input,
-    clustering_separation_rt,
-)
-from cone_detection.cone_fit import _CONE_SMALL_C, _CONE_SMALL_D
+from cone_detection.config import ConeDetectionConfig
+from cone_detection.detector import RealtimeConeDetector
+from cone_detection.clustering.prefilters import bound_dbscan_input
+from cone_detection.fitting.cone_classes import CONE_SMALL_C, CONE_SMALL_D
 
 RNG = np.random.default_rng(11)
 
@@ -31,8 +28,8 @@ def _ground(n: int = 8000) -> np.ndarray:
 
 
 def _cone_cluster(cx: float, cy: float, n: int = 30) -> np.ndarray:
-    z = RNG.uniform(0.06, _CONE_SMALL_D - 0.03, size=n)
-    gamma = (_CONE_SMALL_D - z) / _CONE_SMALL_C
+    z = RNG.uniform(0.06, CONE_SMALL_D - 0.03, size=n)
+    gamma = (CONE_SMALL_D - z) / CONE_SMALL_C
     norm = math.hypot(cx, cy)
     ux, uy = cx / norm, cy / norm
     psi = RNG.uniform(-1.0, 1.0, size=n)
@@ -72,13 +69,13 @@ class _CapturingDBSCAN:
 def test_guard_is_noop_below_cap():
     cfg = ConeDetectionConfig(dbscan_max_points=1000)
     pts = RNG.uniform(-1.0, 1.0, (999, 3))
-    assert _bound_dbscan_input(pts, cfg) is pts
+    assert bound_dbscan_input(pts, cfg) is pts
 
 
 def test_guard_disabled_with_zero_cap():
     cfg = ConeDetectionConfig(dbscan_max_points=0)
     pts = RNG.uniform(-1.0, 1.0, (50_000, 3))
-    assert _bound_dbscan_input(pts, cfg) is pts
+    assert bound_dbscan_input(pts, cfg) is pts
 
 
 def test_guard_bounds_count_and_density_and_keeps_order():
@@ -89,7 +86,7 @@ def test_guard_bounds_count_and_density_and_keeps_order():
         [RNG.uniform(0, 1, 30_000), RNG.uniform(0, 1, 30_000), RNG.uniform(0, 0.2, 30_000)]
     )
     pts = pts[np.argsort(pts[:, 0])]  # sorted input to check order preservation
-    out = _bound_dbscan_input(pts, cfg)
+    out = bound_dbscan_input(pts, cfg)
     assert len(out) <= 2000
     # Density is bounded: no two kept points share a 0.05 m voxel.
     ijk = np.floor(out / 0.05).astype(np.int64)
@@ -104,8 +101,8 @@ def test_dbscan_never_sees_more_than_cap_on_pathological_scan():
         [_ground(30_000), _cone_cluster(5.0, 1.0), _low_dense_terrain(60_000, 10_000.0)]
     ).astype(np.float32)
     st: dict = {}
-    clustering_separation_rt(
-        scan, cfg, clustering_class=_CapturingDBSCAN, stage_timings=st
+    RealtimeConeDetector(cfg).detect(
+        scan, clustering_class=_CapturingDBSCAN, stage_timings=st
     )
     assert _CapturingDBSCAN.seen and max(_CapturingDBSCAN.seen) <= 5000
     assert st["n_dbscan_guard_dropped"] > 40_000
@@ -118,7 +115,7 @@ def test_guard_untouched_on_normal_scene_and_counter_zero():
     st: dict = {}
     cones = RealtimeConeDetector(ConeDetectionConfig()).detect(
         scan, debug_counters=counters, stage_timings=st
-    )
+    ).cones
     assert st["n_dbscan_guard_dropped"] == 0
     assert counters["dbscan_guard_scans"] == 0
     assert counters["dbscan_guard_dropped"] == 0
@@ -133,7 +130,7 @@ def test_cone_still_detected_when_guard_fires():
     terrain[:, 0] += 6.0  # push to x >= 12 m
     scan = np.vstack([_ground(30_000), cone, terrain]).astype(np.float32)
     counters: dict = {}
-    cones = RealtimeConeDetector(cfg).detect(scan, debug_counters=counters)
+    cones = RealtimeConeDetector(cfg).detect(scan, debug_counters=counters).cones
     assert counters["dbscan_guard_scans"] == 1
     assert counters["dbscan_guard_dropped"] > 30_000
     near = [c for c in cones if math.hypot(c[0] - 5.0, c[1] - 1.0) < 0.3]

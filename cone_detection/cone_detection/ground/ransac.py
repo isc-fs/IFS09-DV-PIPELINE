@@ -1,12 +1,54 @@
 """Numba-compiled RANSAC plane fit, used for ground-plane removal.
 
-The live caller is `cone_detection.clustering_separation_rt`, which fits
-the LiDAR ground plane on every scan before clustering the outliers
-into cones. Tested for 2D and 3D data; extending to higher dimensions
-would need changes to the cross-product step in the iteration loop.
+Called by the ``ransac`` family of ground methods (``ground/methods/plane_methods.py``)
+on every scan. ``ransac_ground_mask`` is the 3-D production kernel; ``ransac2`` also
+handles the MAD threshold and 2-D data (extending it to higher dimensions would need
+changes to the cross-product step in the iteration loop).
 """
+import math
+
 import numpy as np
 import numba
+
+
+@numba.njit(cache=True)
+def _iteration_budget(k, support, n_scored, prob, m):
+    """Standard adaptive RANSAC bound after a new best ``support``, never above ``k``.
+
+    Guards the perfect-inlier case (log(0) = -inf) and never lets the budget
+    climb: degenerate scans must exit cleanly instead of running for thousands
+    of iterations.
+    """
+    inlier_ratio = support / n_scored
+    if 0.0 < inlier_ratio < 1.0:
+        k_new = np.log(1 - prob) / np.log(1 - inlier_ratio ** m)
+        if k_new < k:
+            return k_new
+    return k
+
+
+@numba.njit(cache=True)
+def _support_on_slope_form(A_xy, A_z, coefs, threshold, m):
+    """Points within ``threshold`` of ``z = A_xy . coefs[:-1] / -coefs[-1]``, minus ``m``."""
+    support = 0
+    for i in A_xy.dot(coefs[:-1] / (-1 * coefs[-1])) - A_z:
+        if abs(i) < threshold:
+            support += 1
+    return support - m
+
+
+@numba.njit(cache=True)
+def _support_3d(sx, sy, sz, c0, c1, c2, c3, threshold, m):
+    """Subsample points within vertical distance ``threshold`` of the plane, minus ``m``.
+
+    ``|bias + n . p| < threshold * |n_z|  <=>  |z_plane(x, y) - z| < threshold``.
+    """
+    lim = threshold * abs(c3)
+    cnt = 0
+    for s in range(sx.shape[0]):
+        if abs(c0 + c1 * sx[s] + c2 * sy[s] + c3 * sz[s]) < lim:
+            cnt += 1
+    return cnt - m
 
 
 # cache=True persists compiled machine code in __pycache__ (or
@@ -109,19 +151,11 @@ def ransac2(
         and abs(initial_coefs[-1]) > 1e-12
     ):
         warm = initial_coefs.astype(np.float64)
-        support_aux = 0
-        for i in A_xy.dot(warm[:-1] / (-1 * warm[-1])) - A_z:
-            if abs(i) < threshold:
-                support_aux += 1
-        support_aux -= m
+        support_aux = _support_on_slope_form(A_xy, A_z, warm, threshold, m)
         if support_aux > support:
             support = support_aux
             def_coefs = warm.copy()
-            inlier_ratio = support / iter_data_size
-            if 0.0 < inlier_ratio < 1.0:
-                k_new = np.log(1 - prob) / np.log(1 - inlier_ratio ** m)
-                if k_new < k:
-                    k = k_new
+            k = _iteration_budget(k, support, iter_data_size, prob, m)
 
     points_ind = np.empty(m, dtype=np.int64)
     while iters < k and iters < max_iter:
@@ -155,23 +189,11 @@ def ransac2(
         bias = -np.dot(normal_vector, points[0][1:])
         coefs = np.array([bias] + list(normal_vector))
 
-        support_aux = 0
-        for i in A_xy.dot((coefs[:-1] / (-1 * coefs[-1]))) - A_z:
-            if abs(i) < threshold:
-                support_aux += 1
-        support_aux -= m
+        support_aux = _support_on_slope_form(A_xy, A_z, coefs, threshold, m)
         if support_aux > support:
             support = support_aux
             def_coefs = coefs
-            inlier_ratio = support / iter_data_size
-            # Refine the iteration budget toward the standard RANSAC
-            # bound. Guard the perfect-inlier case (log(0) = -inf) and
-            # never let k climb above max_iter — degenerate scans must
-            # exit cleanly instead of running for thousands of iters.
-            if 0.0 < inlier_ratio < 1.0:
-                k_new = np.log(1 - prob) / np.log(1 - inlier_ratio ** m)
-                if k_new < k:
-                    k = k_new
+            k = _iteration_budget(k, support, iter_data_size, prob, m)
         iters += 1
     if def_coefs[-1] < 0:
         def_coefs = -1 * def_coefs
@@ -184,3 +206,125 @@ def ransac2(
         ),
         def_coefs,
     )
+
+
+@numba.njit(cache=True)
+def ransac_ground_mask(
+    data,
+    prob,
+    threshold,
+    max_iter,
+    iter_subsample_max,
+    initial_coefs,
+):
+    """``ransac2`` for the 3-D ground plane, without its temporaries.
+
+    Same algorithm and the same plane test (vertical distance to the plane below
+    ``threshold``, warm start scored as candidate zero, adaptive iteration bound),
+    restructured around what dominated its run time on a 100-170 k point scan:
+
+    * reads the raw ``(N, 3)`` cloud (float32 as decoded, any layout) instead of a
+      float64 bias-augmented copy, and never materialises ``A[:, :-1]`` / ``A[:, -1]``;
+    * the scoring subsample is ``iter_subsample_max`` independent random draws
+      (O(n_sub)); ``np.random.choice(..., replace=False)`` is a full O(N)
+      permutation in Numba. Scoring estimates an inlier *ratio*, so draws with
+      replacement serve as well;
+    * candidates are scored in a scalar loop over the subsample: no per-iteration
+      ``dot`` result array and no BLAS threads waking up for 5000 points;
+    * the final pass writes the outlier mask directly (no index array to invert).
+
+    ``threshold`` must be positive (``ransac2`` keeps the MAD fallback).
+
+    Returns ``(non_ground_mask, plane coefficients [bias, n_x, n_y, n_z])`` with
+    ``n_z >= 0``. Non-finite points are outliers.
+    """
+    n = data.shape[0]
+    n_sub = int(iter_subsample_max)
+    if n_sub <= 0 or n_sub > n:
+        n_sub = n
+    sx = np.empty(n_sub)
+    sy = np.empty(n_sub)
+    sz = np.empty(n_sub)
+    if n_sub < n:
+        for s in range(n_sub):
+            i = np.random.randint(0, n)
+            sx[s] = data[i, 0]
+            sy[s] = data[i, 1]
+            sz[s] = data[i, 2]
+    else:
+        for s in range(n):
+            sx[s] = data[s, 0]
+            sy[s] = data[s, 1]
+            sz[s] = data[s, 2]
+
+    m = 3
+    k = float(max_iter)
+    support = 0
+    best = np.array([0.0, 0.0, 0.0, 1.0])
+
+    if initial_coefs.shape[0] == 4 and abs(initial_coefs[3]) > 1e-12:
+        c0 = float(initial_coefs[0])
+        c1 = float(initial_coefs[1])
+        c2 = float(initial_coefs[2])
+        c3 = float(initial_coefs[3])
+        cnt = _support_3d(sx, sy, sz, c0, c1, c2, c3, threshold, m)
+        if cnt > support:
+            support = cnt
+            best[0] = c0
+            best[1] = c1
+            best[2] = c2
+            best[3] = c3
+            k = _iteration_budget(k, support, n_sub, prob, m)
+
+    iters = 0
+    while iters < k and iters < max_iter:
+        iters += 1
+        # Anchors come from the FULL cloud; the subsample only scores them.
+        i0 = np.random.randint(0, n)
+        i1 = np.random.randint(0, n)
+        while i1 == i0:
+            i1 = np.random.randint(0, n)
+        i2 = np.random.randint(0, n)
+        while i2 == i0 or i2 == i1:
+            i2 = np.random.randint(0, n)
+        px = np.float64(data[i0, 0])
+        py = np.float64(data[i0, 1])
+        pz = np.float64(data[i0, 2])
+        ax = np.float64(data[i1, 0]) - px
+        ay = np.float64(data[i1, 1]) - py
+        az = np.float64(data[i1, 2]) - pz
+        bx = np.float64(data[i2, 0]) - px
+        by = np.float64(data[i2, 1]) - py
+        bz = np.float64(data[i2, 2]) - pz
+        nx = ay * bz - az * by
+        ny = az * bx - ax * bz
+        nz = ax * by - ay * bx
+        norm = math.sqrt(nx * nx + ny * ny + nz * nz)
+        # Collinear / duplicate / non-finite anchors, or a vertical plane (no
+        # z = f(x, y) form): no support, like the NaN / inf scores they used to get.
+        if not (norm > 0.0) or not math.isfinite(norm) or nz == 0.0:
+            continue
+        nx /= norm
+        ny /= norm
+        nz /= norm
+        c0 = -(nx * px + ny * py + nz * pz)
+        cnt = _support_3d(sx, sy, sz, c0, nx, ny, nz, threshold, m)
+        if cnt > support:
+            support = cnt
+            best[0] = c0
+            best[1] = nx
+            best[2] = ny
+            best[3] = nz
+            k = _iteration_budget(k, support, n_sub, prob, m)
+
+    if best[3] < 0:
+        best = -1 * best
+    c0 = best[0]
+    c1 = best[1]
+    c2 = best[2]
+    c3 = best[3]
+    lim = threshold * abs(c3)
+    outlier = np.empty(n, np.bool_)
+    for i in range(n):
+        outlier[i] = not (abs(c0 + c1 * data[i, 0] + c2 * data[i, 1] + c3 * data[i, 2]) < lim)
+    return outlier, best
