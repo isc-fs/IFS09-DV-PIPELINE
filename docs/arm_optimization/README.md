@@ -74,6 +74,7 @@ period.
 | [validation.md](validation.md) | How we know the output did not change: equivalence tests, labelled-cone replay, IFSSIM CI, and the open acceleration regression. |
 | [how_to_measure.md](how_to_measure.md) | Board setup and the exact commands behind every number. |
 | [next_steps.md](next_steps.md) | What is next, ranked. |
+| [../control/control_loop.pdf](../control/control_loop.pdf) | The control loop: architecture, delays, every equation, the Stanley yaw-rate stability analysis and fix, delay compensation, measurements, limits above 10 m/s (LaTeX source next to it). |
 
 ## Commits on the branch
 

@@ -77,6 +77,33 @@ def yaw_from_quat(qw: float, qz: float) -> float:
     return 2.0 * math.atan2(qz, qw)
 
 
+def predict_pose(
+    pose: tuple[float, float, float], v: float, steer_hist: list[float], n: int,
+    wheelbase: float, max_steer_rad: float, dt: float,
+) -> tuple[float, float, float]:
+    """Pose n ticks ahead, driven by the steering commands already sent.
+
+    A command acts on the car only after the actuation delay, so over the next
+    n ticks the car follows the last n commands, which are known exactly. This
+    integrates the kinematic bicycle (speed v, midpoint heading) through them:
+    steer_hist holds the published commands, newest last, normalised, positive =
+    right; tick j uses the command published n - j ticks ago (0 before the first).
+    n <= 0 returns the pose as is.
+    """
+    x, y, yaw = pose
+    for j in range(n):
+        back = n - j
+        u = steer_hist[-back] if len(steer_hist) >= back else 0.0
+        r = v * math.tan(-u * max_steer_rad) / wheelbase
+        hm = yaw + 0.5 * r * dt
+        x += v * math.cos(hm) * dt
+        y += v * math.sin(hm) * dt
+        yaw += r * dt
+    if n > 0:
+        yaw = (yaw + math.pi) % (2.0 * math.pi) - math.pi
+    return (x, y, yaw)
+
+
 def project_pose(
     pose: tuple[float, float, float],
     odom_then: tuple[float, float, float],

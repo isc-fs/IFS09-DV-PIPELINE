@@ -40,6 +40,8 @@ typedef struct {
   int lateral; /* CTRL_LAT_* */
   double lookahead_min, lookahead_k, lookahead_max, lookahead_radius_factor;
   double stanley_k, stanley_k_soft, stanley_k_yaw_rate, stanley_k_damp_steer;
+  /* yaw-rate damping gain += this · wheelbase / max(v, 1): fixed loop gain */
+  double stanley_yaw_rate_loop_gain;
   /* longitudinal (PI velocity) */
   double v_max, a_lat_max, a_dec_max, kp, ki, deadband, throttle_max;
   double regen_power_w, vehicle_mass, unseen_corner_radius, brake_latency_s;
@@ -48,6 +50,9 @@ typedef struct {
   double throttle_rate, throttle_release_rate, regen_rate, steering_rate;
   double stop_latch_min_travel, stop_past_anchor_m;
   int stop_on_anchor; /* 1: stop on the anchor, straight-line distance */
+  /* delay compensation: steer for the pose this far ahead (s), predicted
+   * through the steering already sent, in whole ticks; 0 = off */
+  double latency_comp_s;
 } ctrl_params_t;
 
 /* The Python defaults (PurePursuit/Stanley/PIVelocity constructors and
@@ -106,6 +111,16 @@ void ctrl_hist_add(ctrl_odom_hist_t *h, double t, double x, double y,
                    double yaw);
 /* 1 and out[3] = (x, y, yaw) at t, or 0 (OdomHistory.at with max_gap 0.25). */
 int ctrl_hist_at(const ctrl_odom_hist_t *h, double t, double out[3]);
+/* Published steering commands kept for delay compensation (0.4 s). */
+#define CTRL_STEER_HIST 16
+
+/* Pose n ticks ahead through the steering commands already sent: kinematic
+ * bicycle at speed v, midpoint heading; tick j uses the command published
+ * n - j ticks ago (hist: count values, oldest first, normalised, positive =
+ * right; 0 before the first). n <= 0 copies the pose. */
+void ctrl_predict_pose(const double pose[3], double v, const double *hist,
+                       int count, int n, double wheelbase, double max_steer_rad,
+                       double dt, double out[3]);
 void ctrl_project_pose(const double pose[3], const double then[3],
                        const double now[3], double out[3]);
 
@@ -137,6 +152,8 @@ typedef struct {
 
   double last_throttle, last_regen, last_steering;
   uint32_t tick_count;
+  int steer_n; /* published steering, oldest first (shifted, it is short) */
+  double steer_hist[CTRL_STEER_HIST];
 
   ctrl_pi_t pi;
   double stanley_prev;

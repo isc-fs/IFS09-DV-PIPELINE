@@ -26,6 +26,8 @@ from control.state import VehicleState
 
 ROOT = pathlib.Path(__file__).resolve().parents[2] / "control_cpp"
 TOL = 1e-9  # libm hypot vs Python's math.hypot may differ in the last bit
+# -fno-builtin: clang fuses sin(a) and cos(a) into one sincos call whose result
+# can differ from Python's separate calls in the last bit (seen on macOS).
 
 D = C.c_double
 PD = C.POINTER(C.c_double)
@@ -37,14 +39,14 @@ class Params(C.Structure):
         ("lookahead_min", D), ("lookahead_k", D), ("lookahead_max", D),
         ("lookahead_radius_factor", D),
         ("stanley_k", D), ("stanley_k_soft", D), ("stanley_k_yaw_rate", D),
-        ("stanley_k_damp_steer", D),
+        ("stanley_k_damp_steer", D), ("stanley_yaw_rate_loop_gain", D),
         ("v_max", D), ("a_lat_max", D), ("a_dec_max", D), ("kp", D), ("ki", D),
         ("deadband", D), ("throttle_max", D),
         ("regen_power_w", D), ("vehicle_mass", D), ("unseen_corner_radius", D),
         ("brake_latency_s", D), ("v_meas_tau", D), ("v_meas_max_accel", D),
         ("throttle_rate", D), ("throttle_release_rate", D), ("regen_rate", D),
         ("steering_rate", D), ("stop_latch_min_travel", D), ("stop_past_anchor_m", D),
-        ("stop_on_anchor", C.c_int),
+        ("stop_on_anchor", C.c_int), ("latency_comp_s", D),
     ]
 
 
@@ -55,7 +57,7 @@ def lib(tmp_path_factory):
         pytest.skip("no C compiler")
     out = tmp_path_factory.mktemp("cc") / "libcontrol_core_test.so"
     subprocess.run(
-        [cc, "-std=c99", "-O2", "-ffp-contract=off", "-shared", "-fPIC",
+        [cc, "-std=c99", "-O2", "-ffp-contract=off", "-fno-builtin", "-shared", "-fPIC",
          f"-I{ROOT / 'include'}", str(ROOT / "src" / "control_core.c"),
          str(ROOT / "test" / "core_shim.c"), "-o", str(out), "-lm"],
         check=True)
@@ -74,6 +76,7 @@ def lib(tmp_path_factory):
     L.ctrl_hist_at.restype = C.c_int
     L.ctrl_hist_at.argtypes = [C.c_void_p, D, PD]
     L.ctrl_project_pose.argtypes = [PD, PD, PD, PD]
+    L.ctrl_predict_pose.argtypes = [PD, D, PD, C.c_int, C.c_int, D, D, D, PD]
     L.ctrl_brake_entry_speed.restype = D
     L.ctrl_brake_entry_speed.argtypes = [C.POINTER(Params), D, D]
     L.ctrl_quat_yaw.restype = D
@@ -161,7 +164,8 @@ def test_lateral_controllers(lib, seed):
     p = params(lib)
     bike = KinematicBicycle(wheelbase=p.wheelbase, max_steer_rad=p.max_steer_rad)
     pp = PurePursuit(lookahead_min=1.0, lookahead_k=0.5, model=bike)
-    stan = Stanley(k=2.0, k_soft=1.5, k_yaw_rate=0.5, k_damp_steer=0.2, model=bike)
+    stan = Stanley(k=2.0, k_soft=1.5, k_yaw_rate=0.0, k_damp_steer=0.2, model=bike,
+                   yaw_rate_loop_gain=0.2)
     prev = D(0.0)
     worst = 0.0
     for _ in range(500):
@@ -247,6 +251,20 @@ def test_odom_history_and_projection(lib):
     lib.shim_free(h)
 
 
+def test_predict_pose(lib):
+    from control.odom_history import predict_pose
+    rng = random.Random(4)
+    res = (D * 3)()
+    for _ in range(3000):
+        pose = (rng.uniform(-50, 50), rng.uniform(-50, 50), rng.uniform(-math.pi, math.pi))
+        v = rng.uniform(-1, 15)
+        hist = [rng.uniform(-1, 1) for _ in range(rng.randint(0, 16))]
+        n = rng.randint(-1, 6)
+        lib.ctrl_predict_pose(arr(pose), v, arr(hist), len(hist), n, 1.627,
+                              math.radians(18.2), 0.025, res)
+        assert tuple(res) == predict_pose(pose, v, hist, n, 1.627, math.radians(18.2), 0.025)
+
+
 def test_quaternion_yaw(lib):
     t3d = pytest.importorskip("transforms3d.euler")
     rng = random.Random(9)
@@ -296,20 +314,23 @@ def _track(kind: str):
     return f, per
 
 
-@pytest.mark.parametrize("mode,behavior", [
-    ("trackdrive", "pure_pursuit"), ("autocross", "stanley"),
-    ("skidpad", "stanley"), ("accel", "pure_pursuit")])
-def test_node_closed_loop(lib, mode, behavior):
+@pytest.mark.parametrize("mode,behavior,latency", [
+    ("trackdrive", "pure_pursuit", 0.0), ("autocross", "stanley", 0.0),
+    ("skidpad", "stanley", 0.0), ("accel", "pure_pursuit", 0.0),
+    ("autocross", "stanley", 0.05), ("trackdrive", "pure_pursuit", 0.075)])
+def test_node_closed_loop(lib, mode, behavior, latency):
     rclpy = pytest.importorskip("rclpy")
     from nav_msgs.msg import Odometry, Path
     from geometry_msgs.msg import PoseStamped
     from std_msgs.msg import Bool
     from dv_msgs.msg import ConeArray
     from control.control_node import ControlNode
+    from rclpy.parameter import Parameter
 
     rclpy.init()
     try:
         node = ControlNode()
+        node.set_parameters([Parameter("latency_comp_s", value=latency)])
         node._mode_name = mode
         node._behavior = behavior
         node._build_strategies()
@@ -320,7 +341,7 @@ def test_node_closed_loop(lib, mode, behavior):
         p = params(lib, lateral=1 if behavior == "stanley" else 0,
                    v_max=12.0 if mode == "accel" else 5.0,
                    unseen_corner_radius=0.0 if mode == "accel" else 4.5,
-                   stop_on_anchor=1 if mode == "skidpad" else 0)
+                   stop_on_anchor=1 if mode == "skidpad" else 0, latency_comp_s=latency)
         cn = lib.shim_node_new(C.byref(p))
         out = (D * 8)()
 

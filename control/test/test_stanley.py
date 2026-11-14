@@ -101,3 +101,19 @@ def _xy_at(ref, i):
 
 def _mirror(ref):
     return ReferenceTrajectory.from_xy(ref.x, [-v for v in ref.y])
+
+
+def test_speed_scaled_yaw_rate_gain_keeps_the_loop_gain():
+    """yaw_rate_loop_gain c adds c·L/v to the yaw-rate gain: the steering change
+    per rad/s of excess yaw rate times v/L (the loop gain) is c at any speed."""
+    import math
+    from control.reference import ReferenceTrajectory
+    from control.state import VehicleState
+    ref = ReferenceTrajectory.from_xy([float(i) for i in range(-2, 30)], [0.0] * 32)
+    for v in (2.0, 4.5, 9.0, 15.0):
+        c = Stanley(k=2.0, k_soft=1.5, k_yaw_rate=0.0, model=BIKE, yaw_rate_loop_gain=0.2)
+        a = c.compute(VehicleState(vx=v, yaw_rate=0.0), ref)
+        c.reset()
+        b = c.compute(VehicleState(vx=v, yaw_rate=0.01), ref)
+        loop = (a - b) * BIKE.max_steer_rad / 0.01 * v / BIKE.wheelbase
+        assert math.isclose(loop, 0.2, rel_tol=1e-6), (v, loop)

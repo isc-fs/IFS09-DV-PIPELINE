@@ -45,7 +45,8 @@ void ctrl_params_default(ctrl_params_t *p) {
   p->lookahead_radius_factor = 0.7;
   p->stanley_k = 2.0;
   p->stanley_k_soft = 1.5;
-  p->stanley_k_yaw_rate = 0.5;
+  p->stanley_k_yaw_rate = 0.0;
+  p->stanley_yaw_rate_loop_gain = 0.2;
   p->stanley_k_damp_steer = 0.2;
   p->v_max = 5.0;
   p->a_lat_max = 3.0;
@@ -67,6 +68,7 @@ void ctrl_params_default(ctrl_params_t *p) {
   p->stop_latch_min_travel = 30.0;
   p->stop_past_anchor_m = 8.0;
   p->stop_on_anchor = 0;
+  p->latency_comp_s = 0.0;
 }
 
 /* ------------------------------------------- reference.py: from_xy */
@@ -276,7 +278,7 @@ static void project_onto_polyline(double x, double y, const ctrl_ref_t *r,
 double ctrl_stanley(const ctrl_params_t *p, const ctrl_state_t *st,
                     const ctrl_ref_t *r, double *prev_steer_norm) {
   double fx, fy, off, pyaw, pcurv, yaw_error, speed, cte_term, omega_ref;
-  double yaw_rate_term, steer_rad, prev_steer_rad, steer_norm;
+  double yaw_rate_term, steer_rad, prev_steer_rad, steer_norm, k_yr;
   if (ctrl_ref_empty(r)) return 0.0;
 
   fx = st->x + p->wheelbase * cos(st->yaw);
@@ -286,7 +288,11 @@ double ctrl_stanley(const ctrl_params_t *p, const ctrl_state_t *st,
   speed = state_speed(st);
   cte_term = atan2(p->stanley_k * off, p->stanley_k_soft + speed);
   omega_ref = speed * pcurv;
-  yaw_rate_term = p->stanley_k_yaw_rate * (st->yaw_rate - omega_ref);
+  k_yr = p->stanley_k_yaw_rate;
+  if (p->stanley_yaw_rate_loop_gain > 0.0) {
+    k_yr += p->stanley_yaw_rate_loop_gain * p->wheelbase / pmax(speed, 1.0);
+  }
+  yaw_rate_term = k_yr * (st->yaw_rate - omega_ref);
   steer_rad = yaw_error + cte_term - yaw_rate_term;
 
   prev_steer_rad = *prev_steer_norm * p->max_steer_rad;
@@ -498,6 +504,26 @@ int ctrl_hist_at(const ctrl_odom_hist_t *h, double t, double out[3]) {
   return 1;
 }
 
+void ctrl_predict_pose(const double pose[3], double v, const double *hist,
+                       int count, int n, double wheelbase, double max_steer_rad,
+                       double dt, double out[3]) {
+  int j;
+  double x = pose[0], y = pose[1], yaw = pose[2];
+  for (j = 0; j < n; ++j) {
+    const int back = n - j;
+    const double u = count >= back ? hist[count - back] : 0.0;
+    const double r = v * tan(-u * max_steer_rad) / wheelbase;
+    const double hm = yaw + 0.5 * r * dt;
+    x += v * cos(hm) * dt;
+    y += v * sin(hm) * dt;
+    yaw += r * dt;
+  }
+  if (n > 0) yaw = py_mod(yaw + PI_D, TWO_PI_D) - PI_D;
+  out[0] = x;
+  out[1] = y;
+  out[2] = yaw;
+}
+
 void ctrl_project_pose(const double pose[3], const double then[3],
                        const double now[3], double out[3]) {
   const double dh = pose[2] - then[2];
@@ -549,6 +575,7 @@ void ctrl_node_reset(ctrl_node_t *n) {
   n->last_x = n->last_y = 0.0;
   n->last_throttle = n->last_regen = n->last_steering = 0.0;
   n->tick_count = 0;
+  n->steer_n = 0;
   ctrl_pi_reset(&n->pi);
   n->pi.last_v_set = 0.0;
   n->pi.last_kappa_max = 0.0;
@@ -652,6 +679,15 @@ int ctrl_node_on_orange(ctrl_node_t *n, const double *xs, const double *ys,
   return 1;
 }
 
+static void remember_steer(ctrl_node_t *n, double u) {
+  int i;
+  if (n->steer_n == CTRL_STEER_HIST) {
+    for (i = 1; i < CTRL_STEER_HIST; ++i) n->steer_hist[i - 1] = n->steer_hist[i];
+    n->steer_n--;
+  }
+  n->steer_hist[n->steer_n++] = u;
+}
+
 static double slew(double prev, double target, double max_step,
                    double max_down) {
   if (target > prev + max_step) return prev + max_step;
@@ -671,7 +707,10 @@ void ctrl_node_tick(ctrl_node_t *n, ctrl_out_t *out) {
   ctrl_ref_build(ref, n->path_x, n->path_y, n->path_n > 0 ? n->path_k : NULL,
                  n->path_n);
   out->path_n = ref->n;
-  if (!n->have_pose || !n->have_odom || ctrl_ref_empty(ref)) return;
+  if (!n->have_pose || !n->have_odom || ctrl_ref_empty(ref)) {
+    remember_steer(n, 0.0); /* the fail-safe zero command is published */
+    return;
+  }
 
   /* _build_state: /slam/pose carried forward to the newest /odom. */
   {
@@ -695,6 +734,21 @@ void ctrl_node_tick(ctrl_node_t *n, ctrl_out_t *out) {
     st.vx = n->odom_vx;
     st.vy = n->odom_vy;
     st.yaw_rate = n->odom_wz;
+    /* delay compensation: the pose when this command acts */
+    {
+      const int nt = (int)(p->latency_comp_s * CTRL_RATE_HZ + 0.5);
+      if (nt > 0) {
+        pose[0] = st.x;
+        pose[1] = st.y;
+        pose[2] = st.yaw;
+        ctrl_predict_pose(pose, st.vx, n->steer_hist, n->steer_n, nt,
+                          p->wheelbase, p->max_steer_rad, 1.0 / CTRL_RATE_HZ,
+                          moved);
+        st.x = moved[0];
+        st.y = moved[1];
+        st.yaw = moved[2];
+      }
+    }
   }
 
   if (!n->have_last_xy) {
@@ -744,6 +798,7 @@ void ctrl_node_tick(ctrl_node_t *n, ctrl_out_t *out) {
   n->last_throttle = out->throttle;
   n->last_regen = out->brake;
   n->last_steering = out->steering;
+  remember_steer(n, out->steering);
 
   out->computed = 1;
   out->v_set = n->pi.last_v_set;

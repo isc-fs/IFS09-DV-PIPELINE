@@ -40,3 +40,13 @@ changes the rounding.
    the command; `steering` is positive to the right, as `ControlCommand`.
 
 The Pi then only forwards the path, the pose and the cones.
+
+## Parameters added on 14 November 2026
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `stanley_yaw_rate_loop_gain` | 0.2 | Stanley yaw-rate damping becomes `stanley_k_yaw_rate + this · L / max(v, 1)`, so the yaw-rate loop gain stays 0.2 at any speed. The old fixed 0.5 gave loop gain 1.4 at 4.5 m/s and a 4 Hz weave in HIL. |
+| `latency_comp_s` | 0.0 (off) | Steer for the pose this far ahead, predicted through the commands already sent. Off: in the delay model it adds no tracking. |
+
+The derivation and the measurements are in
+[docs/control/control_loop.pdf](../docs/control/control_loop.pdf).

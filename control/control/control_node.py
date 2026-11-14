@@ -51,7 +51,7 @@ from control.controllers.pure_pursuit import PurePursuit
 from control.controllers.stanley import Stanley
 from control.controllers.pi_velocity import PIVelocity
 from control.models.bicycle import KinematicBicycle
-from control.odom_history import OdomHistory, project_pose, yaw_from_quat
+from control.odom_history import OdomHistory, predict_pose, project_pose, yaw_from_quat
 from control.stop_target import distance_to_stop, stop_target
 
 
@@ -147,6 +147,8 @@ class ControlNode(BaseLifecycleNode):
         self._last_throttle: float = 0.0
         self._last_regen:    float = 0.0
         self._last_steering: float = 0.0
+        # Published steering commands, newest last (delay compensation).
+        self._steer_hist: list[float] = []
         self._tick_count: int = 0
 
         # I/O handles, set in on_configure / on_activate.
@@ -244,6 +246,7 @@ class ControlNode(BaseLifecycleNode):
         self._last_throttle = 0.0
         self._last_regen = 0.0
         self._last_steering = 0.0
+        self._steer_hist = []
         self._tick_count = 0
 
         # Controller-internal state (PI integrator, Stanley steer-rate
@@ -434,7 +437,14 @@ class ControlNode(BaseLifecycleNode):
         # lever that breaks the cycle. Confirmed on a live autocross run.
         self.declare_parameter("stanley_k", 2.0)
         self.declare_parameter("stanley_k_soft", 1.5)
-        self.declare_parameter("stanley_k_yaw_rate", 0.5)
+        # Yaw-rate damping, speed scaled (2026-11-14): the gain is
+        # stanley_k_yaw_rate + stanley_yaw_rate_loop_gain · L / v. The fixed 0.5
+        # made the yaw-rate loop gain 1.4 at 4.5 m/s, and with ~100 ms from
+        # command to measured yaw rate the steering oscillated at 4 Hz in HIL
+        # (20 of 24 cones hit were in Stanley's autocross). Loop gain 0.2 holds
+        # from 3 to 10 m/s in the delay model; docs/control/control_loop.tex.
+        self.declare_parameter("stanley_k_yaw_rate", 0.0)
+        self.declare_parameter("stanley_yaw_rate_loop_gain", 0.2)
         self.declare_parameter("stanley_k_damp_steer", 0.2)
         # Kinematic-bicycle geometry. Used by every lateral controller
         # via the shared KinematicBicycle model. Default matches the
@@ -477,6 +487,13 @@ class ControlNode(BaseLifecycleNode):
         #   steering: ~90° rack travel in 0.2 s ≈ 5.0 normalized/s
         # Each can be raised by parameter for debugging without code
         # changes; setting to a very large number disables that cap.
+        # Delay compensation: steer for the pose the car will have when the
+        # command acts, predicted through the steering commands already sent
+        # (rounded to whole 25 ms ticks). Off: with the speed-scaled Stanley
+        # gain the ~45 ms actuation delay costs no tracking in the delay model,
+        # and predicting adds preview that cuts corners (+0.01 to +0.07 m RMS);
+        # docs/control/control_loop.tex. Set ~0.05 to test it on the car.
+        self.declare_parameter("latency_comp_s", 0.0)
         self.declare_parameter("throttle_rate", 2.0)
         # Releasing throttle is the safe direction, so it may fall faster than
         # it rises: at 2.0/s it took 0.5 s to lift off from full throttle and
@@ -559,6 +576,7 @@ class ControlNode(BaseLifecycleNode):
                 k_yaw_rate=self._p("stanley_k_yaw_rate"),
                 k_damp_steer=self._p("stanley_k_damp_steer"),
                 model=bicycle,
+                yaw_rate_loop_gain=self._p("stanley_yaw_rate_loop_gain"),
             )
         else:
             raise ValueError(f"unknown lateral_controller={lat_name!r}")
@@ -744,6 +762,7 @@ class ControlNode(BaseLifecycleNode):
         )
 
         if state is None or ref.empty:
+            self._remember_steer(cmd.steering)
             self._cmd_pub.publish(cmd)
             self._publish_latency_ms(t0)
             return
@@ -769,6 +788,7 @@ class ControlNode(BaseLifecycleNode):
         # Strategies own all algorithm logic. Per-tick state is immutable;
         # any internal accumulator (PI integral) lives on the drive controller.
         if self._drive is None:
+            self._remember_steer(cmd.steering)
             self._cmd_pub.publish(cmd)
             self._publish_latency_ms(t0)
             return
@@ -831,6 +851,7 @@ class ControlNode(BaseLifecycleNode):
         self._last_throttle = cmd.throttle
         self._last_regen    = cmd.brake
         self._last_steering = cmd.steering
+        self._remember_steer(cmd.steering)
 
         self._cmd_pub.publish(cmd)
 
@@ -859,6 +880,11 @@ class ControlNode(BaseLifecycleNode):
                 f"stop_d={ref.stop_distance:.1f} latched={ref.stop_latched}"
             )
         self._publish_latency_ms(t0)
+
+    def _remember_steer(self, u: float) -> None:
+        self._steer_hist.append(u)
+        if len(self._steer_hist) > _STEER_HIST:
+            del self._steer_hist[0]
 
     def _publish_latency_ms(self, t0: float) -> None:
         if self._latency_pub is None:
@@ -914,6 +940,12 @@ class ControlNode(BaseLifecycleNode):
             p.pose.pose.position.x, p.pose.pose.position.y, yaw,
             p.header.stamp,
         )
+        n = int(float(self._p("latency_comp_s")) * self.PUBLISH_RATE_HZ + 0.5)
+        if n > 0 and self._drive is not None:
+            model = self._drive._lateral.model
+            x, y, yaw = predict_pose(
+                (x, y, yaw), t.twist.twist.linear.x, self._steer_hist, n,
+                model.wheelbase, model.max_steer_rad, 1.0 / self.PUBLISH_RATE_HZ)
         return VehicleState(
             x=x,
             y=y,
@@ -922,6 +954,9 @@ class ControlNode(BaseLifecycleNode):
             vy=t.twist.twist.linear.y,
             yaw_rate=t.twist.twist.angular.z,
         )
+
+
+_STEER_HIST = 16  # ticks of published steering kept (0.4 s): caps latency_comp_s
 
 
 def _slew(prev: float, target: float, max_step: float,

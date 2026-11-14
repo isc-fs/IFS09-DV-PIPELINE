@@ -76,6 +76,7 @@ class Stanley(LateralController):
         k_yaw_rate: float = 0.0,
         k_damp_steer: float = 0.0,
         model: KinematicBicycle | None = None,
+        yaw_rate_loop_gain: float = 0.0,
     ) -> None:
         self.k = k
         self.k_soft = k_soft
@@ -87,6 +88,13 @@ class Stanley(LateralController):
         # rate-of-change side; this term reduces single-tick swings on
         # noisy paths.
         self.k_damp_steer = k_damp_steer
+        # Speed-scaled yaw-rate damping: adds yaw_rate_loop_gain · L / v to
+        # k_yaw_rate, so the gain around the yaw-rate loop (steer → yaw rate is
+        # v / L rad/s per rad) stays yaw_rate_loop_gain at any speed. A fixed
+        # k_yaw_rate of 0.5 is a loop gain of 1.4 at 4.5 m/s; with the ~100 ms
+        # from command to measured yaw rate that loop oscillated at 4 Hz in HIL
+        # (docs/control/control_loop.tex).
+        self.yaw_rate_loop_gain = yaw_rate_loop_gain
         self.model = model or KinematicBicycle()
         # Previous tick's normalized steering — input to the damping
         # term. Reset() clears it.
@@ -121,7 +129,11 @@ class Stanley(LateralController):
         # Yaw-rate damping (Hoffmann §3.3) on the MEASURED yaw rate,
         # relative to the yaw rate the path itself asks for.
         omega_ref = state.speed * proj.curvature
-        yaw_rate_term = self.k_yaw_rate * (state.yaw_rate - omega_ref)
+        k_yaw_rate = self.k_yaw_rate
+        if self.yaw_rate_loop_gain > 0.0:
+            k_yaw_rate += (self.yaw_rate_loop_gain * self.model.wheelbase
+                           / max(state.speed, _V_FLOOR))
+        yaw_rate_term = k_yaw_rate * (state.yaw_rate - omega_ref)
 
         steer_rad = yaw_error + cte_term - yaw_rate_term
 
@@ -142,6 +154,10 @@ class Stanley(LateralController):
         steer_norm = self.model.normalize_steer(steer_rad)
         self._prev_steer_norm = steer_norm
         return steer_norm
+
+
+# Speed floor for the speed-scaled yaw-rate gain (m/s): bounds it at standstill.
+_V_FLOOR = 1.0
 
 
 @dataclass(frozen=True)

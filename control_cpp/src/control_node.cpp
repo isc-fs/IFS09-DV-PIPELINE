@@ -181,7 +181,8 @@ private:
         {"unseen_corner_radius", 4.5}, {"brake_latency_s", 0.3},
         {"lookahead_min", 1.0}, {"lookahead_k", 0.5},
         {"stanley_k", 2.0}, {"stanley_k_soft", 1.5},
-        {"stanley_k_yaw_rate", 0.5}, {"stanley_k_damp_steer", 0.2},
+        {"stanley_k_yaw_rate", 0.0}, {"stanley_yaw_rate_loop_gain", 0.2},
+        {"stanley_k_damp_steer", 0.2}, {"latency_comp_s", 0.0},
         {"wheelbase", 1.627}, {"max_steer_deg", 18.2},
         {"kp_v", 0.5}, {"ki_v", 0.05}, {"deadband_v", 0.05}, {"throttle_max", 1.0},
         {"accel.v_max", 12.0}, {"v_meas_tau", 0.15}, {"v_meas_max_accel", 20.0},
@@ -228,6 +229,7 @@ private:
     p.stanley_k_soft = num("stanley_k_soft");
     p.stanley_k_yaw_rate = num("stanley_k_yaw_rate");
     p.stanley_k_damp_steer = num("stanley_k_damp_steer");
+    p.stanley_yaw_rate_loop_gain = num("stanley_yaw_rate_loop_gain");
     p.v_max = mode_num("v_max");
     p.a_lat_max = num("a_lat_max");
     p.a_dec_max = num("a_dec_max");
@@ -261,6 +263,7 @@ private:
     p.stop_latch_min_travel = num("stop_latch_min_travel");
     p.stop_past_anchor_m = num("stop_past_anchor_m");
     p.stop_on_anchor = contains(strings("stop_on_anchor_modes"), mode_name_) ? 1 : 0;
+    p.latency_comp_s = num("latency_comp_s");
   }
 
   void refresh_node_params() {node_params(core_->p);}
