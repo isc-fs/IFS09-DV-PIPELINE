@@ -50,8 +50,11 @@ import rclpy
 import numpy as np
 from typing import TYPE_CHECKING
 
+from cone_detection.deskew import deskew_xy, scan_time_model, stamp_seconds
+
 from builtin_interfaces.msg import Time
 from dv_msgs.msg import ConeArray
+from nav_msgs.msg import Odometry
 from node_base.base_lifecycle_node import BaseLifecycleNode
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import TransitionCallbackReturn, State
@@ -207,6 +210,14 @@ class ConeDetectionNode(BaseLifecycleNode):
         self._pub_n_left = None
         self._pub_n_right = None
         self._sub = None
+        # Per-cone motion compensation (cone_detection/deskew.py). The /odom reader is
+        # created on the first cloud that carries point times, so the sim (no
+        # timestamp field) never pays for it.
+        self.declare_parameter("deskew_cones", True)
+        self.declare_parameter("deskew_odom_topic", "/odom")
+        self._sub_odom = None
+        self._odom = None  # (receive time s, v m/s, yaw rate rad/s)
+        self._deskew_warned = False
         self._reset_diag()
 
     def _config_from_params(self, base):
@@ -442,8 +453,9 @@ class ConeDetectionNode(BaseLifecycleNode):
         big_orange_threshold = (
             self._cone_strategy.big_orange_height_threshold_m()
         )
+        cones = self._deskew(msg, result.cones)
         cones_msg, orange_msg = self._cones_to_arrays(
-            result.cones,
+            cones,
             stamp=msg.header.stamp,
             big_orange_threshold_m=big_orange_threshold,
         )
@@ -455,7 +467,7 @@ class ConeDetectionNode(BaseLifecycleNode):
         self._pub_cones_orange.publish(orange_msg)
         if _has_subs(self._pub_markers) or _has_subs(self._pub_orange):
             marker_array, orange_array = self._cones_to_markers(
-                result.cones,
+                cones,
                 stamp=msg.header.stamp,
                 big_orange_threshold_m=big_orange_threshold,
             )
@@ -463,6 +475,59 @@ class ConeDetectionNode(BaseLifecycleNode):
                 self._pub_markers.publish(marker_array)
             if _has_subs(self._pub_orange):
                 self._pub_orange.publish(orange_array)
+
+    _ODOM_MAX_AGE_S = 0.5
+
+    def _on_odom(self, msg: Odometry) -> None:
+        self._odom = (
+            time.monotonic(),
+            float(msg.twist.twist.linear.x),
+            float(msg.twist.twist.angular.z),
+        )
+
+    def _deskew(self, msg: PointCloud2, cones: list) -> list:
+        """Cones moved to the car frame at ``msg.header.stamp`` (see deskew.py).
+
+        Unchanged when disabled, when the cloud has no point times, or when /odom
+        is missing or older than 0.5 s."""
+        if not cones or not self.get_parameter("deskew_cones").value:
+            return cones
+        offsets = {f.name: (f.offset, f.datatype) for f in msg.fields}
+        if "timestamp" not in offsets:
+            return cones
+        if self._sub_odom is None:
+            self._sub_odom = self.create_subscription(
+                Odometry,
+                self.get_parameter("deskew_odom_topic").value,
+                self._on_odom,
+                QoSProfile(
+                    reliability=QoSReliabilityPolicy.RELIABLE,
+                    history=QoSHistoryPolicy.KEEP_LAST,
+                    depth=10,
+                    durability=QoSDurabilityPolicy.VOLATILE,
+                ),
+            )
+        odom = self._odom
+        if odom is None or time.monotonic() - odom[0] > self._ODOM_MAX_AGE_S:
+            if not self._deskew_warned:
+                self.get_logger().warn(
+                    "cone deskew: no recent /odom; cones keep their sweep-time positions"
+                )
+                self._deskew_warned = True
+            return cones
+        model = scan_time_model(
+            msg.data, msg.width * msg.height, msg.point_step, offsets,
+            stamp_seconds(msg.header.stamp),
+        )
+        if model is None:
+            return cones
+        x = np.array([c.x for c in cones], dtype=np.float64)
+        y = np.array([c.y for c in cones], dtype=np.float64)
+        x0, y0 = deskew_xy(x, y, model, odom[1], odom[2])
+        return [
+            dataclasses.replace(c, x=float(a), y=float(b))
+            for c, a, b in zip(cones, x0, y0)
+        ]
 
     def _accumulate_diagnostics(self, result: DetectionResult) -> None:
         """Sum per-scan filter counters and emit one CONE_FILTER line per second."""
