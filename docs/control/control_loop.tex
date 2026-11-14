@@ -558,7 +558,7 @@ from \SI{4.5}{} to \SI{4}{\hertz}.
 \end{itemize}
 
 %=====================================================================
-\section{Measured performance (HIL v10, before the fix)}
+\section{Measured performance (HIL v10, before the fixes)}
 %=====================================================================
 Ground truth from the sim, recorded on the HIL computer. ``Offset'' is half the
 difference between the distances to the blue and yellow boundaries. ``Clearance'' is the
@@ -626,6 +626,92 @@ speed cap sets lap time, not grip. The 95th percentile of lateral acceleration i
 \item Skidpad reached \SI{6.9}{\metre\per\second} against $v_{\max} = 5$. This is still
 open.
 \end{itemize}
+
+%=====================================================================
+\section{Measured performance after the fixes (HIL v12)}\label{sec:v12}
+%=====================================================================
+The same 10 missions on pipeline \texttt{b1a2bf9} (14 November 2026): control in C, the
+speed-scaled Stanley gain (\cref{eq:kr}), the \texttt{final\_lap} race fix (SLAM recreates
+its latched writers every mission) and centreline smoothing 0.05. All 10 missions finished
+(v11, C control with the old gain, failed acceleration and trackdrive D).
+
+\begin{table}[h]
+\centering\small
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}llrrrrrr@{}}
+\toprule
+Mission & Lateral & Cones hit & Reversals /\SI{100}{\metre} & At rate limit (\%) & Clearance min (m) & Offset RMS (m) & $\bar v$ (m/s) \\
+\midrule
+Acceleration & PP & 0 \,(0) & 5.8 \,(2.6) & 0.0 \,(0.0) & 1.42 \,(1.35) & 0.04 \,(0.10) & 10.31 \\
+Skidpad & Stanley & 1 \,(4) & 6.0 \,(26.6) & 0.1 \,(11.3) & 0.73 \,(0.63) & -- & 4.41 \\
+Autocross A & Stanley & 1 \,(6) & 25.7 \,(146.9) & 0.5 \,(16.2) & 0.73 \,(0.54) & 0.23 \,(0.33) & 4.58 \\
+Autocross B & Stanley & 0 \,(4) & 21.9 \,(137.9) & 0.7 \,(12.8) & 0.89 \,(0.62) & 0.19 \,(0.33) & 4.72 \\
+Autocross C & Stanley & 1 \,(7) & 23.3 \,(125.8) & 0.8 \,(11.0) & 0.76 \,(0.53) & 0.22 \,(0.34) & 4.64 \\
+Autocross D & Stanley & 0 \,(3) & 27.8 \,(130.2) & 0.7 \,(10.6) & 0.79 \,(0.52) & 0.23 \,(0.36) & 4.44 \\
+Trackdrive A & PP & 0 \,(0) & 11.1 \,(7.7) & 0.7 \,(0.2) & 1.04 \,(0.97) & 0.12 \,(0.12) & 4.75 \\
+Trackdrive B & PP & 0 \,(0) & 7.9 \,(7.7) & 0.3 \,(0.3) & 1.06 \,(1.04) & 0.10 \,(0.12) & 4.85 \\
+Trackdrive C & PP & 0 \,(0) & 13.2 \,(7.9) & 1.5 \,(0.6) & 1.03 \,(0.94) & 0.12 \,(0.12) & 4.78 \\
+Trackdrive D & PP & 0 \,(0) & 13.9 \,(10.1) & 1.5 \,(0.9) & 1.06 \,(0.93) & 0.12 \,(0.14) & 4.72 \\
+\bottomrule
+\end{tabular}}
+\caption{HIL v12, with v10 in brackets. Per-mission windows for v12 come from the mission
+start messages in the bag; v10 used manual windows.}
+\label{tab:v12}
+\end{table}
+
+\begin{figure}[!htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar, bar width=5pt, width=0.48\linewidth, height=5.4cm, ymin=0,
+  title={\small Cones hit (budget 0)}, ylabel={cones},
+  symbolic x coords={Acc,Skid,AxA,AxB,AxC,AxD,TdA,TdB,TdC,TdD},
+  xtick={Acc,Skid,AxA,AxB,AxC,AxD,TdA,TdB,TdC,TdD},
+  x tick label style={font=\scriptsize, rotate=45, anchor=east},
+  legend style={font=\scriptsize}, legend columns=1,
+]
+\addplot[fill=stan!70] coordinates {(Acc,0) (Skid,4) (AxA,6) (AxB,4) (AxC,7) (AxD,3) (TdA,0) (TdB,0) (TdC,0) (TdD,0)};
+\addplot[fill=orange!70] coordinates {(Acc,1) (Skid,1) (AxA,5) (AxB,4) (AxC,8) (AxD,4) (TdA,0) (TdB,0) (TdC,0) (TdD,0)};
+\addplot[fill=fix!70] coordinates {(Acc,0) (Skid,1) (AxA,1) (AxB,0) (AxC,1) (AxD,0) (TdA,0) (TdB,0) (TdC,0) (TdD,0)};
+\legend{v10 Python, v11 C old gain, v12 fixes}
+\end{axis}
+\end{tikzpicture}\hfill
+\begin{tikzpicture}
+\begin{axis}[
+  ybar, bar width=5pt, width=0.48\linewidth, height=5.4cm, ymin=0,
+  title={\small Steering reversals per 100 m (budget 30)},
+  symbolic x coords={Acc,Skid,AxA,AxB,AxC,AxD,TdA,TdB,TdC,TdD},
+  xtick={Acc,Skid,AxA,AxB,AxC,AxD,TdA,TdB,TdC,TdD},
+  x tick label style={font=\scriptsize, rotate=45, anchor=east},
+  legend style={font=\scriptsize},
+]
+\addplot[fill=stan!70] coordinates {(Acc,2.6) (Skid,26.6) (AxA,146.9) (AxB,137.9) (AxC,125.8) (AxD,130.2) (TdA,7.7) (TdB,7.7) (TdC,7.9) (TdD,10.1)};
+\addplot[fill=fix!70] coordinates {(Acc,5.8) (Skid,6.0) (AxA,25.7) (AxB,21.9) (AxC,23.3) (AxD,27.8) (TdA,11.1) (TdB,7.9) (TdC,13.2) (TdD,13.9)};
+\legend{v10, v12}
+\draw[bud, dashed, thick] (rel axis cs:0,0.193) -- (rel axis cs:1,0.193);
+\end{axis}
+\end{tikzpicture}
+\caption{HIL v10 against v12, per mission. Dashed: the budget, 30 reversals per 100 m.}
+\label{fig:v12}
+\end{figure}
+
+\paragraph{What changed.}
+\begin{itemize}
+\item \textbf{Stanley:} the \SI{4}{\hertz} weave is gone. Autocross steering reversals fell
+about five times, time at the rate limit from 11--16\,\% to under 1\,\%, and the closest
+approach to a cone rose from 0.52--0.62 to 0.73--0.89\,m, all above the car's half-width.
+Cones hit fell from 24 to 3.
+\item \textbf{Trackdrive (Pure Pursuit):} slightly busier steering (reversals 8--14 per
+\SI{100}{\metre}, was 8--10; full lock about 2\,\% of the time on tracks A and C), most likely
+because the less-smoothed path follows the cones more closely. Path error fell from 0.19 to
+0.13\,m RMS and clearance rose. Mean speed fell slightly, 4.72--4.85 against
+4.80--4.88\,m/s.
+\item \textbf{Core 7:} mean 45.7\,\%, p95 51.9\,\% (v10: 94.3\,\% and 100\,\%).
+\item \textbf{Skidpad} peaked at \SI{5.02}{\metre\per\second} (v10: 6.9 against a cap of 5);
+not investigated.
+\end{itemize}
+Trackdrive D ran at 0.94 of real time because a CI job shared the HIL computer; its
+throttle/regen switching (330, v10: 180) may partly come from that.
 
 %=====================================================================
 \section{Going past \SI{10}{\metre\per\second}}
