@@ -55,6 +55,7 @@
   <exec_depend>cone_slam</exec_depend>
   <exec_depend>path_planning</exec_depend>
   <exec_depend>control</exec_depend>
+  <exec_depend>control_cpp</exec_depend>
   <exec_depend>odometry_filter_node</exec_depend>
   <exec_depend>bag_recorder_node</exec_depend>
 

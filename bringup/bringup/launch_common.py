@@ -216,6 +216,16 @@ def _pin(name: str) -> dict:
     return {"prefix": prefix} if prefix else {}
 
 
+def control_package(env: dict | None = None) -> str:
+    """Package that provides control_node: `control_cpp` (the C controller in
+    an rclcpp shell, the default) or `control` (the Python reference) when
+    DV_CONTROL=python. Both have the same node name, topics and parameters."""
+    impl = ((os.environ if env is None else env).get("DV_CONTROL") or "cpp").strip()
+    if impl not in ("cpp", "python"):
+        raise ValueError(f"DV_CONTROL={impl!r}, expected 'cpp' or 'python'")
+    return "control_cpp" if impl == "cpp" else "control"
+
+
 def autonomy_lifecycle(
     package: str,
     executable: str,
@@ -282,7 +292,7 @@ def autonomy_actions(profile: str = "sim") -> list:
             remappings=remaps["path_planning_node"],
         ),
         autonomy_lifecycle(
-            "control", "control_node", "control_node",
+            control_package(), "control_node", "control_node",
             # control_node no longer publishes /fsds/control_command
             # directly — its output flows on /ctrl/cmd_internal to
             # mission_control_node, which (while RUNNING) republishes it

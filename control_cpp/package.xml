@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>control_cpp</name>
+  <version>0.1.0</version>
+  <description>
+    The DV vehicle controller (Pure Pursuit / Stanley + PI velocity, finish
+    stop, actuator slew) as plain C99 in control_core, with no heap, OS or ROS
+    dependency so it ports to the uDV STM32H7, plus control_node: an rclcpp
+    lifecycle shell with the same name, topics and parameters as the Python
+    control package it replaces.
+  </description>
+  <maintainer email="moranguerra18@gmail.com">Raúl Morán</maintainer>
+  <license>GPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>node_base_cpp</depend>
+  <depend>dv_msgs</depend>
+  <depend>fs_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

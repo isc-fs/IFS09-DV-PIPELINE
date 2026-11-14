@@ -73,8 +73,11 @@ flowchart LR
    at 96 %** (control, odometry filter, network interrupts). Profiled
    ([validation](validation.md#control-on-core-7-it-is-the-rclpy-executor-not-the-controller)):
    0.7 % is the control law, the rest is rclpy's executor. The leaking TF listener and the
-   QoS-event waitables are gone: 55.7 → 37 % after 10 missions in a bag replay. Next: a HIL
-   run to confirm core 7. Long term, control moves to the uDV STM32H7.
+   QoS-event waitables are gone: 55.7 → 37 % after 10 missions in a bag replay. Control is now
+   plain C behind a thin rclcpp node, the same output as the Python node, 3.4 % of core 7 in
+   the replay ([validation](validation.md#control-in-c-ready-for-the-udv)). Next: a HIL run to
+   confirm core 7. Long term, `control_core.c` moves to the uDV STM32H7 as is
+   (`control_cpp/README.md`).
 7. C++ clustering: a hash grid instead of the sorted-key search. Clustering is 6.4 ms of
    the 11.7 ms cpp detect. Do it after SW-02b, which shrinks its input. Also make crop
    skip the zero-fill (0.25 ms).

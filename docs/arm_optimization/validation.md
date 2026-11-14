@@ -718,9 +718,52 @@ xychart-beta
 "Before" is one run; the other two are the mean of three (39–43 % and 34–40 %). Runs vary
 by about ±3 points, so read the second step as roughly 9 %.
 
-On the car there is no `/clock`, which removes another 59 wakeups a second. The control law
-itself is negligible, so porting control to C++ is not worth it: control moves to the uDV's
-STM32H7 later, and the Pi side then only forwards the path and pose.
+On the car there is no `/clock`, which removes another 59 wakeups a second.
+
+### Control in C, ready for the uDV
+
+Control will run on the uDV's STM32H7. To make that a copy rather than a rewrite, the
+controller is now plain C (`control_cpp/src/control_core.c`): C99 and `<math.h>`, no heap,
+no OS, no ROS. On the Pi a thin rclcpp node (`control_cpp/src/control_node.cpp`) feeds it,
+with the Python node's name, topics, QoS and parameters. The launch starts it by default;
+`DV_CONTROL=python` brings back the Python node.
+
+```mermaid
+flowchart LR
+    subgraph Pi["Orange Pi, now"]
+        I["/Path, /slam/pose, /odom,<br/>/cones_orange, /slam/final_lap"] --> N["control_node<br/>(rclcpp shell)"] --> K["control_core.c"]
+        K --> N --> O["/ctrl/cmd_internal"]
+    end
+    subgraph U["uDV STM32H7, later"]
+        F["path, pose, cones<br/>from the Pi"] --> K2["control_core.c<br/>(same file)"] --> A["actuators"]
+    end
+```
+
+It gives the same commands as the Python node. `control/test/test_control_core_c.py` builds the
+C file and compares it with the Python package: each controller on random inputs, and the
+whole node over 120 s closed-loop runs of trackdrive, autocross, skidpad and acceleration
+(4,800 ticks each). The largest difference is below 1e-9 (`hypot` in libm and in Python can
+differ in the last bit); all 15 tests pass on the RK3588.
+
+Same bag replay as above, control alone on core 7, fresh node, 60 s:
+
+| | Python | **C** |
+|---|---|---|
+| CPU, % of core 7 (runs) | 39.9, 39.8 | **3.5, 3.4, 3.3** |
+| Memory (RSS) | 51 MB | **13 MB** |
+| Ticks published over the replay | 2,934 | 2,933 |
+
+```mermaid
+xychart-beta
+    title "Control CPU alone on core 7 (% of core, bag replay, budget 100)"
+    x-axis ["Python, before fixes", "Python, after fixes", "C"]
+    y-axis "% of core" 0 --> 100
+    bar [55.7, 39.9, 3.4]
+    line [100, 100, 100]
+```
+
+("Python, before fixes" is after 10 missions, the others with a fresh node.) Not yet run in
+HIL: the next HIL session should show core 7 dropping from 96 % by most of control's ~70 %.
 
 ### Open
 
@@ -736,3 +779,4 @@ STM32H7 later, and the Pi side then only forwards the path and pose.
    from 99 to 67 % and planning latency from 42 to 20 ms p50. **Core 7 is at 96 % now**
    (control, odometry filter, network interrupts). Profiled: it is rclpy's executor, and an
    unused TF listener that leaked a `/tf` subscription per mission (removed, above).
+   Control is now C: 3.4 % of the core against 40 % in replay (above); HIL check next.
