@@ -749,34 +749,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # internal stop-anchor logic in control_node for braking;
         # this publisher just emits the default false until a future
         # PR wires the lap-min-distance + big-orange detector to it.
-        finished_qos = QoSProfile(
-            depth=1,
-            reliability=QoSReliabilityPolicy.RELIABLE,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
-        )
-        self._finished_pub = self.create_lifecycle_publisher(
-            Bool, "/slam/finished", finished_qos
-        )
-        # /slam/final_lap — "the next finish gate is the closing one".
-        # control_node gates its stop-anchor latch on this so trackdrive
-        # brakes at lap 10 instead of lap 1. Deliberately separate from
-        # /slam/finished: that one requires standstill, and the car only
-        # stops BECAUSE control braked — gating the anchor on it deadlocks.
-        # Same latched QoS: control must inherit the current value whenever
-        # it (re)activates mid-run, not wait for the next edge.
-        self._final_lap_pub = self.create_lifecycle_publisher(
-            Bool, "/slam/final_lap", finished_qos
-        )
-        # /slam/stop_request — "criterion met, car still rolling: stop it".
-        # mission_control turns this into DV_STOPPING so the uDV can brake.
-        # Distinct from /slam/finished, which requires standstill — the car
-        # has no service brake, so it can never reach standstill unaided and
-        # /slam/finished would never fire. Latched for the same reason as its
-        # siblings: a late/re-activating consumer must inherit the request,
-        # not miss the edge and leave the car rolling.
-        self._stop_request_pub = self.create_lifecycle_publisher(
-            Bool, "/slam/stop_request", finished_qos
-        )
+        self._create_latched_pubs()
         self._pub_hz = self.create_lifecycle_publisher(
             Float32, "/cone_slam/hz", 10
         )
@@ -806,6 +779,48 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._tf_broadcaster = TransformBroadcaster(self)
 
         return TransitionCallbackReturn.SUCCESS
+
+
+    def _create_latched_pubs(self) -> None:
+        """Create the three latched mission-state publishers.
+
+        Called from on_configure and again from every on_activate, after
+        on_deactivate destroyed them. A writer that survives from one mission
+        to the next keeps the last run's value in its TRANSIENT_LOCAL cache,
+        and a subscriber that (re)joins at the next activate can get that old
+        value AFTER the new mission's first one: HIL v11, trackdrive 4, control
+        read final_lap False (new) then True (the previous trackdrive's last
+        value, 75 ms later) and stopped the car after lap 1. A fresh writer
+        has nothing old to replay.
+        """
+        finished_qos = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._finished_pub = self.create_lifecycle_publisher(
+            Bool, "/slam/finished", finished_qos
+        )
+        # /slam/final_lap — "the next finish gate is the closing one".
+        # control_node gates its stop-anchor latch on this so trackdrive
+        # brakes at lap 10 instead of lap 1. Deliberately separate from
+        # /slam/finished: that one requires standstill, and the car only
+        # stops BECAUSE control braked — gating the anchor on it deadlocks.
+        # Same latched QoS: control must inherit the current value whenever
+        # it (re)activates mid-run, not wait for the next edge.
+        self._final_lap_pub = self.create_lifecycle_publisher(
+            Bool, "/slam/final_lap", finished_qos
+        )
+        # /slam/stop_request — "criterion met, car still rolling: stop it".
+        # mission_control turns this into DV_STOPPING so the uDV can brake.
+        # Distinct from /slam/finished, which requires standstill — the car
+        # has no service brake, so it can never reach standstill unaided and
+        # /slam/finished would never fire. Latched for the same reason as its
+        # siblings: a late/re-activating consumer must inherit the request,
+        # not miss the edge and leave the car rolling.
+        self._stop_request_pub = self.create_lifecycle_publisher(
+            Bool, "/slam/stop_request", finished_qos
+        )
 
     def on_activate(self, state: LifecycleState) -> TransitionCallbackReturn:
         self.get_logger().info(
@@ -934,6 +949,8 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # first dropped them, so subscribers kept the previous run's latched
         # values: after an autocross (final_lap=true) a trackdrive's control
         # still read final_lap=true and stopped at the end of lap 1.
+        if self._final_lap_pub is None:
+            self._create_latched_pubs()
         ret = super().on_activate(state)
         if ret != TransitionCallbackReturn.SUCCESS:
             return ret
@@ -979,6 +996,17 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # the stack is "already prepared". on_activate calls this again
         # (cheap) so the rebuild is idempotent.
         self._reset_run_memory()
+        # Drop the latched writers so the next mission starts from fresh
+        # ones (see _create_latched_pubs).
+        for pub in (self._finished_pub, self._final_lap_pub,
+                    self._stop_request_pub):
+            if pub is not None:
+                self.destroy_lifecycle_publisher(pub)
+        self._finished_pub = None
+        self._final_lap_pub = None
+        self._stop_request_pub = None
+        self._final_lap_published = None
+        self._stop_request_published = None
         return super().on_deactivate(state)
 
     def on_cleanup(self, state: LifecycleState) -> TransitionCallbackReturn:

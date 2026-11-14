@@ -643,6 +643,16 @@ class ControlNode(BaseLifecycleNode):
         topic rather than inheriting the last run's.
         """
         value = bool(msg.data)
+        if (value and not self._final_lap
+                and self._travelled < float(self._p("stop_latch_min_travel"))):
+            # A rise before the car has moved is not this mission's closing
+            # lap: it is the previous mission's latched value, which DDS can
+            # deliver after this mission's first one (HIL v11, trackdrive 4:
+            # False then a stale True 75 ms later, stop after lap 1).
+            self.get_logger().warning(
+                f"/slam/final_lap → True ignored at {self._travelled:.1f} m: "
+                "stale value from the last mission")
+            return
         if value and not self._final_lap:
             # SLAM raises final_lap as the car crosses the line that starts the
             # closing lap, with that line's big-orange gate still in view.

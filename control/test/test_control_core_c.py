@@ -89,6 +89,8 @@ def lib(tmp_path_factory):
     L.ctrl_node_on_path.argtypes = [C.c_void_p, PD, PD, PD, C.c_int]
     L.ctrl_node_on_final_lap.restype = C.c_int
     L.ctrl_node_on_final_lap.argtypes = [C.c_void_p, C.c_int]
+    L.shim_node_final_lap.restype = C.c_int
+    L.shim_node_final_lap.argtypes = [C.c_void_p]
     L.ctrl_node_on_orange.restype = C.c_int
     L.ctrl_node_on_orange.argtypes = [C.c_void_p, PD, PD, C.c_int, PD, PD, PD, PD]
     L.shim_node_tick.argtypes = [C.c_void_p, PD]
@@ -314,6 +316,20 @@ def _track(kind: str):
     return f, per
 
 
+def test_final_lap_rise_before_moving_is_ignored(lib):
+    """A False -> True edge before stop_latch_min_travel is the last mission's
+    latched value (HIL v11, trackdrive 4 stopped after lap 1): ignored."""
+    cn = lib.shim_node_new(C.byref(params(lib)))
+    try:
+        assert lib.shim_node_final_lap(cn) == 1          # safe default
+        assert lib.ctrl_node_on_final_lap(cn, 0) == 1    # this mission: not yet
+        assert lib.ctrl_node_on_final_lap(cn, 1) == -1   # stale True, at 0 m
+        assert lib.shim_node_final_lap(cn) == 0
+        assert lib.ctrl_node_on_final_lap(cn, 0) == 0
+    finally:
+        lib.shim_free(cn)
+
+
 @pytest.mark.parametrize("mode,behavior,latency", [
     ("trackdrive", "pure_pursuit", 0.0), ("autocross", "stanley", 0.0),
     ("skidpad", "stanley", 0.0), ("accel", "pure_pursuit", 0.0),
@@ -421,6 +437,13 @@ def test_node_closed_loop(lib, mode, behavior, latency):
                 node._on_path(pm)
                 lib.ctrl_node_on_path(cn, arr(xs), arr(ys), arr(zs), len(xs))
 
+            if mode == "trackdrive" and k == 4:
+                # The previous mission's latched True arriving after this
+                # mission's False (HIL v11): both nodes must ignore it.
+                node._on_final_lap(Bool(data=True))
+                assert lib.ctrl_node_on_final_lap(cn, 1) == -1
+                assert node._final_lap is False
+                assert lib.shim_node_final_lap(cn) == 0
             if mode == "trackdrive" and not final_lap and s_car > per:
                 final_lap = True
             if k % 10 == 3:

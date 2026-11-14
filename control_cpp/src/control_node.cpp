@@ -319,7 +319,12 @@ private:
   void on_final_lap(const std_msgs::msg::Bool::SharedPtr m)
   {
     const bool v = m->data;
-    if (ctrl_node_on_final_lap(core_.get(), v ? 1 : 0)) {
+    const int r = ctrl_node_on_final_lap(core_.get(), v ? 1 : 0);
+    if (r < 0) {
+      RCLCPP_WARN(
+        get_logger(), "/slam/final_lap -> True ignored at %.1f m: stale value from the last mission",
+        core_->travelled);
+    } else if (r) {
       RCLCPP_INFO(
         get_logger(), "/slam/final_lap -> %s%s", v ? "True" : "False",
         v ? "" : " - holding stop anchor until the closing lap");

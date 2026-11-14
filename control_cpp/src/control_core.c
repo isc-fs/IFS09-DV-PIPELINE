@@ -625,6 +625,10 @@ int ctrl_node_on_path(ctrl_node_t *n, const double *xs, const double *ys,
 int ctrl_node_on_final_lap(ctrl_node_t *n, int value) {
   int changed;
   value = value ? 1 : 0;
+  /* A rise before the car has moved is a stale latched value from the last
+   * mission, not this one's closing lap (_on_final_lap in control_node.py). */
+  if (value && !n->final_lap && n->travelled < n->p.stop_latch_min_travel)
+    return -1;
   if (value && !n->final_lap) n->final_lap_from = n->travelled;
   changed = value != n->final_lap;
   n->final_lap = value;

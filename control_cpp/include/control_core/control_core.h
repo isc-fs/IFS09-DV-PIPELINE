@@ -180,7 +180,8 @@ void ctrl_node_on_odom(ctrl_node_t *n, double stamp, double x, double y,
 /* Returns the number of points kept (capped at CTRL_MAX_PATH). */
 int ctrl_node_on_path(ctrl_node_t *n, const double *xs, const double *ys,
                       const double *zs, int count);
-/* Returns 1 when the value changed. */
+/* Returns 1 when the value changed, -1 when a rise was ignored (it came
+ * before stop_latch_min_travel: a stale value from the last mission). */
 int ctrl_node_on_final_lap(ctrl_node_t *n, int value);
 /* Big-orange cones in base_link. Returns 1 when this call latched the stop;
  * anchor (ax, ay) and target (tx, ty) are written then (any may be NULL). */

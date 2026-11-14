@@ -68,6 +68,8 @@ void *shim_node_new(const ctrl_params_t *p) {
   return n;
 }
 
+int shim_node_final_lap(void *node) { return ((ctrl_node_t *)node)->final_lap; }
+
 void shim_node_tick(void *node, double *out8) {
   ctrl_out_t o;
   ctrl_node_tick((ctrl_node_t *)node, &o);

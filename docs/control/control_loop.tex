@@ -693,6 +693,44 @@ Parameters & \texttt{bringup/config/params.yaml} & \texttt{stanley\_yaw\_rate\_l
 use a fresh node.}
 \end{figure}
 
+\paragraph{Core 7 in HIL.} The same 10 missions with the C node (HIL \texttt{hil\_v11\_cctrl},
+14 November 2026, pipeline \texttt{ee729f0}, before the Stanley fix), against the Python
+node (v10). Core 7 runs control, the odometry filter and the network interrupts.
+
+\begin{figure}[!htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar, bar width=12pt, width=0.85\linewidth, height=5.4cm, ymin=0, ymax=110,
+  ylabel={\% of core 7 (budget 100)}, symbolic x coords={mean,p50,p95,p99,ctl}, xtick=data,
+  xticklabels={{core 7, mean},{core 7, p50},{core 7, p95},{core 7, p99},{control process, mean}},
+  x tick label style={font=\scriptsize}, nodes near coords, nodes near coords style={font=\tiny},
+  legend style={font=\scriptsize, at={(0.5,1.03)}, anchor=south}, legend columns=2,
+]
+\addplot[fill=stan!60] coordinates {(mean,94.3) (p50,95.7) (p95,100) (p99,100) (ctl,70.5)};
+\addplot[fill=fix!60] coordinates {(mean,41.0) (p50,40.8) (p95,46.8) (p99,72.5) (ctl,17.4)};
+\legend{Python node (v10), C node (v11)}
+\draw[bud, dashed, thick] (rel axis cs:0,0.909) -- (rel axis cs:1,0.909);
+\end{axis}
+\end{tikzpicture}
+\caption{Core 7 load over the whole HIL session, 1~Hz samples (8194 and 9064). The C
+node in the full loop costs more than in the bag replay (17\,\% against 3.4\,\%): there it
+also carries the rclcpp executor, the message conversions and the logging.}
+\end{figure}
+
+Cones hit were unchanged (Stanley missions 21 against 24, Pure Pursuit trackdrive 0), as
+expected without the gain fix. Two runs failed for reasons outside the control law:
+\begin{itemize}
+\item \textbf{Acceleration} hit a cone at \SI{12.5}{\second} (\SI{6.9}{\metre\per\second}), left
+the track and timed out. This matches the open acceleration regression of the
+perception changes on this branch; it needs a rerun before it is pinned on control.
+\item \textbf{Trackdrive D} stopped after lap 1. Between missions, control got this
+mission's \texttt{/slam/final\_lap = False} and then, \SI{75}{\milli\second} later, the previous
+trackdrive's latched \texttt{True}, because SLAM's latched writer outlived the mission.
+Fixed on both sides: SLAM recreates its latched writers on every activation, and control
+ignores a rise of \texttt{final\_lap} before \texttt{stop\_latch\_min\_travel} (\SI{30}{\metre}).
+\end{itemize}
+
 \paragraph{Porting to the uDV.} The firmware compiles \texttt{control\_core.c} as is. It
 feeds \texttt{ctrl\_node\_on\_odom} from its own odometry, and the path, pose and cones
 from the Pi. It calls \texttt{ctrl\_node\_tick} at \SI{40}{\hertz}. The Cortex-M7 has a

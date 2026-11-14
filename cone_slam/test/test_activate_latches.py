@@ -80,3 +80,28 @@ def test_trackdrive_after_autocross_overrides_the_stale_true(rig):
     _start(slam, "trackdrive")
     _spin(ex)
     assert got[-1] is False, f"trackdrive kept the autocross value: {got}"
+
+
+def test_reactivate_does_not_replay_the_last_missions_value(rig):
+    """HIL v11, trackdrive 4: the latched writer survived deactivate, so a
+    control subscription created at the next activate got this mission's False
+    and then, 75 ms later, the previous mission's True, and stopped after lap
+    1. The writer is now recreated per activate: a subscriber that joins
+    between missions sees only the new mission's values."""
+    slam, _, ex = rig
+    _start(slam, "trackdrive")
+    slam._final_lap_pub.publish(Bool(data=True))   # end of a trackdrive
+    _spin(ex)
+    slam.trigger_deactivate()
+    assert slam._final_lap_pub is None
+    late = rclpy.create_node("final_lap_late_probe")
+    got: list[bool] = []
+    late.create_subscription(Bool, "/slam/final_lap", lambda m: got.append(m.data), LATCHED)
+    ex.add_node(late)
+    try:
+        assert slam.trigger_activate() == rclpy.lifecycle.TransitionCallbackReturn.SUCCESS
+        _spin(ex, 40)
+        assert got == [False], f"the last mission's value reached the new run: {got}"
+    finally:
+        ex.remove_node(late)
+        late.destroy_node()
