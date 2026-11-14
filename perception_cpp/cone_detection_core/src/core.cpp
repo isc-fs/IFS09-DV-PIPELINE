@@ -258,6 +258,194 @@ Plane ransac_plane(const Cloud& xyz, double prob, double threshold, int64_t max_
   return best;
 }
 
+// ---------------------------------------------------------------------------
+// ray_slope ground (= ground_methods.ray_slope_kernel and its helpers)
+// ---------------------------------------------------------------------------
+namespace {
+constexpr int kGpfIters = 10;
+constexpr double kGpfSeedBand = 0.12;
+constexpr double kGpfSeedPct = 2.0;
+constexpr double kPi = 3.141592653589793;  // == np.pi
+
+// = _sym3_min_eigvec (fixed-order cyclic Jacobi)
+std::array<double, 3> sym3_min_eigvec(double a00, double a01, double a02, double a11,
+                                      double a12, double a22) {
+  double a[3][3] = {{a00, a01, a02}, {a01, a11, a12}, {a02, a12, a22}};
+  double v[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+  for (int sweep = 0; sweep < 50; ++sweep) {
+    if (a[0][1] == 0.0 && a[0][2] == 0.0 && a[1][2] == 0.0) break;
+    for (int pq = 0; pq < 3; ++pq) {
+      const int p = pq < 2 ? 0 : 1;
+      const int q = pq == 0 ? 1 : 2;
+      const double apq = a[p][q];
+      if (apq == 0.0) continue;
+      const double theta = (a[q][q] - a[p][p]) / (2.0 * apq);
+      double t = 1.0 / (std::abs(theta) + std::sqrt(theta * theta + 1.0));
+      if (theta < 0.0) t = -t;
+      const double c = 1.0 / std::sqrt(t * t + 1.0);
+      const double s = t * c;
+      for (int k = 0; k < 3; ++k) {
+        const double akp = a[k][p], akq = a[k][q];
+        a[k][p] = c * akp - s * akq;
+        a[k][q] = s * akp + c * akq;
+      }
+      for (int k = 0; k < 3; ++k) {
+        const double apk = a[p][k], aqk = a[q][k];
+        a[p][k] = c * apk - s * aqk;
+        a[q][k] = s * apk + c * aqk;
+      }
+      a[p][q] = 0.0;
+      a[q][p] = 0.0;
+      for (int k = 0; k < 3; ++k) {
+        const double vkp = v[k][p], vkq = v[k][q];
+        v[k][p] = c * vkp - s * vkq;
+        v[k][q] = s * vkp + c * vkq;
+      }
+    }
+  }
+  int j = 0;
+  if (a[1][1] < a[j][j]) j = 1;
+  if (a[2][2] < a[j][j]) j = 2;
+  return {v[0][j], v[1][j], v[2][j]};
+}
+
+// = _fit_plane_idx
+Plane fit_plane_idx(const Cloud& p, const int64_t* idx, std::size_t m) {
+  double sx = 0.0, sy = 0.0, sz = 0.0;
+  for (std::size_t k = 0; k < m; ++k) {
+    const std::size_t i = static_cast<std::size_t>(idx[k]);
+    sx += p[3 * i];
+    sy += p[3 * i + 1];
+    sz += p[3 * i + 2];
+  }
+  const double dm = static_cast<double>(m);
+  const double cx = sx / dm, cy = sy / dm, cz = sz / dm;
+  double xx = 0.0, xy = 0.0, xz = 0.0, yy = 0.0, yz = 0.0, zz = 0.0;
+  for (std::size_t k = 0; k < m; ++k) {
+    const std::size_t i = static_cast<std::size_t>(idx[k]);
+    const double ux = p[3 * i] - cx, uy = p[3 * i + 1] - cy, uz = p[3 * i + 2] - cz;
+    xx += ux * ux;
+    xy += ux * uy;
+    xz += ux * uz;
+    yy += uy * uy;
+    yz += uy * uz;
+    zz += uz * uz;
+  }
+  auto n = sym3_min_eigvec(xx, xy, xz, yy, yz, zz);
+  if (n[2] < 0.0) n = {-n[0], -n[1], -n[2]};
+  Plane out;
+  out.coefs = {-(n[0] * cx + n[1] * cy + n[2] * cz), n[0], n[1], n[2]};
+  return out;
+}
+
+// = _stride_idx
+std::vector<int64_t> stride_idx(const int64_t* src, int64_t m, int64_t cap) {
+  const int64_t step = m <= cap ? 1 : (m + cap - 1) / cap;
+  const int64_t k = (m + step - 1) / step;
+  std::vector<int64_t> out(static_cast<std::size_t>(k));
+  for (int64_t j = 0; j < k; ++j) out[j] = src[j * step];
+  return out;
+}
+
+// = _height
+inline double height_of(const Cloud& p, std::size_t i, const Plane& pl) {
+  const auto& c = pl.coefs;
+  return ((p[3 * i] * c[1] + p[3 * i + 1] * c[2]) + p[3 * i + 2] * c[3]) + c[0];
+}
+
+// = _gpf_plane_idx
+Plane gpf_plane_idx(const Cloud& p, const std::vector<int64_t>& sub, double thr) {
+  const std::size_t n = sub.size();
+  Plane plane;
+  if (n < 3) return plane;
+  std::vector<double> zs(n);
+  for (std::size_t k = 0; k < n; ++k) zs[k] = p[3 * sub[k] + 2];
+  std::sort(zs.begin(), zs.end());
+  const double h = static_cast<double>(n - 1) * (kGpfSeedPct / 100.0);
+  const std::size_t lo = static_cast<std::size_t>(std::floor(h));
+  const std::size_t hi = std::min(lo + 1, n - 1);
+  const double g = h - static_cast<double>(lo);
+  const double d = zs[hi] - zs[lo];
+  const double lpr = g >= 0.5 ? zs[hi] - d * (1.0 - g) : zs[lo] + d * g;
+  std::vector<int64_t> seeds(n);
+  std::size_t m = 0;
+  for (std::size_t k = 0; k < n; ++k)
+    if (p[3 * sub[k] + 2] < lpr + kGpfSeedBand) seeds[m++] = sub[k];
+  for (int it = 0; it < kGpfIters; ++it) {
+    if (m < 3) break;
+    plane = fit_plane_idx(p, seeds.data(), m);
+    std::size_t grown = 0;
+    for (std::size_t k = 0; k < n; ++k)
+      if (std::abs(height_of(p, static_cast<std::size_t>(sub[k]), plane)) < thr)
+        seeds[grown++] = sub[k];
+    const bool converged = grown == m;
+    m = grown;
+    if (converged) break;
+  }
+  return plane;
+}
+}  // namespace
+
+Plane ray_slope_ground(const Cloud& xyz, double thr, double max_slope, double max_gap,
+                       double max_height, int64_t n_sectors, int64_t fit_cap,
+                       std::vector<uint8_t>& outliers) {
+  const std::size_t n = xyz.size() / 3;
+  std::vector<int64_t> all_idx(n);
+  for (std::size_t i = 0; i < n; ++i) all_idx[i] = static_cast<int64_t>(i);
+  const Plane prior =
+      gpf_plane_idx(xyz, stride_idx(all_idx.data(), static_cast<int64_t>(n), fit_cap), thr);
+  std::vector<double> height(n), rng(n);
+  std::vector<int64_t> sector(n);
+  const double two_pi = 2.0 * kPi;
+  for (std::size_t i = 0; i < n; ++i) {
+    height[i] = height_of(xyz, i, prior);
+    rng[i] = std::hypot(xyz[3 * i], xyz[3 * i + 1]);
+    const double az = std::atan2(xyz[3 * i + 1], xyz[3 * i]);
+    sector[i] = static_cast<int64_t>((az + kPi) / two_pi * static_cast<double>(n_sectors)) %
+                n_sectors;
+  }
+  // = np.lexsort((rng, sector)): bucket by sector in index order, then a stable
+  // sort by range inside each bucket.
+  std::vector<int64_t> start(static_cast<std::size_t>(n_sectors) + 1, 0);
+  for (std::size_t i = 0; i < n; ++i) ++start[sector[i] + 1];
+  for (int64_t s = 0; s < n_sectors; ++s) start[s + 1] += start[s];
+  std::vector<int64_t> order(n);
+  {
+    std::vector<int64_t> fill(start.begin(), start.end() - 1);
+    for (std::size_t i = 0; i < n; ++i) order[fill[sector[i]]++] = static_cast<int64_t>(i);
+  }
+  outliers.assign(n, 1);
+  for (int64_t s = 0; s < n_sectors; ++s) {
+    auto b = order.begin() + start[s], e = order.begin() + start[s + 1];
+    std::stable_sort(b, e, [&](int64_t a, int64_t c) { return rng[a] < rng[c]; });
+    double prev_r = 0.0, prev_z = 0.0;
+    for (auto it = b; it != e; ++it) {
+      const std::size_t i = static_cast<std::size_t>(*it);
+      double dr = rng[i] - prev_r;
+      if (dr > max_gap) {
+        prev_r = rng[i];
+        prev_z = 0.0;
+        dr = 0.0;
+      }
+      const double dz = height[i] - prev_z;
+      if (std::abs(dz) <= dr * max_slope + thr && std::abs(height[i]) <= max_height) {
+        outliers[i] = 0;
+        prev_r = rng[i];
+        prev_z = height[i];
+      }
+    }
+  }
+  int64_t m = 0;
+  for (std::size_t i = 0; i < n; ++i)
+    if (!outliers[i]) all_idx[m++] = static_cast<int64_t>(i);
+  Plane plane;
+  if (m >= 3) {
+    const auto sub = stride_idx(all_idx.data(), m, fit_cap);
+    plane = fit_plane_idx(xyz, sub.data(), sub.size());
+  }
+  return plane;
+}
+
 std::vector<uint8_t> plane_outliers(const Cloud& xyz, const Plane& p, double threshold) {
   const double c0 = p.coefs[0] / -p.coefs[3], c1 = p.coefs[1] / -p.coefs[3],
                c2 = p.coefs[2] / -p.coefs[3];

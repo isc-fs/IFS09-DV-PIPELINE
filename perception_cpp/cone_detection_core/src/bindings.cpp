@@ -40,6 +40,11 @@ std::vector<double> vec_from(const std::optional<py::array_t<double, py::array::
   return std::vector<double>(a->data(), a->data() + a->size());
 }
 
+// front()'s ground argument: 0 = ransac, 1 = ray_slope. For ray_slope, ray =
+// [max_slope, max_gap, max_height, n_sectors, fit_cap] (ground_methods.RAY_SLOPE_*).
+constexpr int kGroundRansac = 0;
+constexpr int kGroundRaySlope = 1;
+
 struct FrontOut {
   std::size_t n_cropped = 0;
   cdc::Cloud cropped;
@@ -56,7 +61,8 @@ template <typename T>
 FrontOut front_impl(const T* data, std::size_t n, T crop2, T min2, const std::vector<double>& warm,
                     double prob, double thr, int64_t n_sub_max, bool veto, double veto_h,
                     double veto_cell, int64_t cap, double voxel0, double voxel_max,
-                    bool keep_cropped, cdc::NumbaMt& rng) {
+                    bool keep_cropped, int ground, const std::vector<double>& ray,
+                    cdc::NumbaMt& rng) {
   FrontOut o;
   auto t = Clock::now();
   cdc::Cloud pts = cdc::crop_promote<T>(data, n, crop2, min2);
@@ -68,7 +74,12 @@ FrontOut front_impl(const T* data, std::size_t n, T crop2, T min2, const std::ve
   if (o.n_cropped < 3) {
     outl.assign(o.n_cropped, 1);
   } else {
-    o.plane = cdc::ransac_plane(pts, prob, thr, 200, n_sub_max, warm, rng, outl);
+    if (ground == kGroundRaySlope)
+      o.plane = cdc::ray_slope_ground(pts, thr, ray[0], ray[1], ray[2],
+                                      static_cast<int64_t>(ray[3]), static_cast<int64_t>(ray[4]),
+                                      outl);
+    else
+      o.plane = cdc::ransac_plane(pts, prob, thr, 200, n_sub_max, warm, rng, outl);
   }
   o.ransac_ms = ms_since(t);
   t = Clock::now();
@@ -102,7 +113,11 @@ class Core {
   py::tuple front(py::array data, std::optional<py::array_t<double, py::array::c_style | py::array::forcecast>> warm,
                   double crop2, double min2, double prob, double thr, int64_t n_sub_max,
                   bool veto, double veto_h, double veto_cell, int64_t cap, double voxel0,
-                  double voxel_max, bool keep_cropped) {
+                  double voxel_max, bool keep_cropped, int ground, std::vector<double> ray) {
+    if (ground != kGroundRansac && ground != kGroundRaySlope)
+      throw std::invalid_argument("ground must be 0 (ransac) or 1 (ray_slope)");
+    if (ground == kGroundRaySlope && ray.size() != 5)
+      throw std::invalid_argument("ray_slope needs [max_slope, max_gap, max_height, n_sectors, fit_cap]");
     if (data.ndim() != 2 || data.shape(1) != 3) throw std::invalid_argument("expected an (N, 3) array");
     const auto w = vec_from(warm);
     FrontOut o;
@@ -113,14 +128,14 @@ class Core {
       py::gil_scoped_release nogil;
       o = front_impl<float>(p, n, static_cast<float>(crop2), static_cast<float>(min2), w, prob,
                             thr, n_sub_max, veto, veto_h, veto_cell, cap, voxel0, voxel_max,
-                            keep_cropped, rng_);
+                            keep_cropped, ground, ray, rng_);
     } else if (py::isinstance<py::array_t<double>>(data)) {
       auto a = py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(data);
       const double* p = a.data();
       const std::size_t n = static_cast<std::size_t>(a.shape(0));
       py::gil_scoped_release nogil;
       o = front_impl<double>(p, n, crop2, min2, w, prob, thr, n_sub_max, veto, veto_h,
-                             veto_cell, cap, voxel0, voxel_max, keep_cropped, rng_);
+                             veto_cell, cap, voxel0, voxel_max, keep_cropped, ground, ray, rng_);
     } else {
       throw std::invalid_argument("expected float32 or float64 points");
     }
@@ -185,7 +200,8 @@ PYBIND11_MODULE(cone_detection_core, m) {
       .def("front", &Core::front, py::arg("data"), py::arg("warm"), py::arg("crop2"),
            py::arg("min2"), py::arg("prob"), py::arg("threshold"), py::arg("n_sub_max"),
            py::arg("veto"), py::arg("veto_h"), py::arg("veto_cell"), py::arg("cap"),
-           py::arg("voxel0"), py::arg("voxel_max"), py::arg("keep_cropped"))
+           py::arg("voxel0"), py::arg("voxel_max"), py::arg("keep_cropped"),
+           py::arg("ground") = 0, py::arg("ray") = std::vector<double>{})
       .def("back", &Core::back, py::arg("pts"), py::arg("labels"), py::arg("eps"),
            py::arg("params"))
       .def("randint", [](Core& c, int64_t lo, int64_t hi) { return c.rng().randint(lo, hi); });
@@ -244,6 +260,25 @@ PYBIND11_MODULE(cone_detection_core, m) {
           return py::make_tuple(py::array(py::cast(o)),
                                 to_np(std::vector<double>(p.coefs.begin(), p.coefs.end()), {4}));
         });
+  m.def("ray_slope_ground",
+        [](py::array_t<double, py::array::c_style | py::array::forcecast> xyz, double thr,
+           double max_slope, double max_gap, double max_height, int64_t n_sectors,
+           int64_t fit_cap) {
+          auto pts = cloud_from(xyz);
+          std::vector<uint8_t> outl;
+          cdc::Plane p;
+          {
+            py::gil_scoped_release nogil;
+            p = cdc::ray_slope_ground(pts, thr, max_slope, max_gap, max_height, n_sectors,
+                                      fit_cap, outl);
+          }
+          py::array_t<bool> mask(static_cast<py::ssize_t>(outl.size()));
+          auto* mp = mask.mutable_data();
+          for (std::size_t i = 0; i < outl.size(); ++i) mp[i] = outl[i] != 0;
+          return py::make_tuple(mask, std::vector<double>(p.coefs.begin(), p.coefs.end()));
+        },
+        py::arg("xyz"), py::arg("threshold"), py::arg("max_slope"), py::arg("max_gap"),
+        py::arg("max_height"), py::arg("n_sectors"), py::arg("fit_cap"));
   m.def("sample_without_replacement", [](uint32_t seed, int64_t n, int64_t k) {
     cdc::NumbaMt rng(seed);
     auto v = cdc::sample_without_replacement(rng, n, k);

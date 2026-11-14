@@ -199,9 +199,9 @@ A dense bitmap over the xy cells marks the same cells in one O(m) pass. On the R
 
 `perception_cpp/cone_detection_core` ports the fused kernels 1:1 to C++: the PointCloud2
 decode, crop, RANSAC, rotation, tall-column veto, voxel guard, grid clustering and the cone
-fits. pybind11 exposes them to Python (`cone_detection/cpp_backend.py`). It is opt-in:
-`detector_backend: cpp`. Fused stays the default until cpp has run on the car. Without the
-built module the detector logs one warning and runs fused.
+fits. pybind11 exposes them to Python (`cone_detection/cpp_backend.py`). It is the
+default (`detector_backend: cpp`) since the HIL check. Without the built module the detector
+logs one warning and runs fused.
 
 ```mermaid
 flowchart LR
@@ -284,6 +284,84 @@ Where it comes from:
 The bench also showed rclpy deserialisation at 1.9 ms p50 on the cpp runs against 4.0 ms on
 the fused runs. That is outside the kernels (likely less allocator pressure without the numpy
 decode copies) and is not counted as a gain here. The zero-copy component removes it anyway.
+
+## 8. Local ground: `ray_slope` (SW-02b)
+
+The single RANSAC plane fails where the ground bends. On the manual-run recording (200 s,
+1,749 scans, pavement with slopes) some scans see the ground climb about 1.5 m across the
+view, and the plane then labels half the cones as ground or the hill as obstacles.
+
+**Baseline.** Every ground method in `ground_methods.py` ran through the real detector
+(params.yaml config) on 437 of the recording's scans. There are no labels, so the comparison
+is label-free: cones per scan, cones inside the car's corridor (|y| < 0.75 m, 2–12 m ahead,
+a false-positive proxy) and the scan-to-scan change in count.
+
+| method | cones / scan | scans where RANSAC finds ≥ 3 fewer | method finds ≥ 3 fewer than RANSAC | corridor cones / scan |
+|---|---|---|---|---|
+| ransac (default) | 10.1 | – | – | 0.49 |
+| **ray_slope** | **11.5** | **23 %** | **0 %** | 0.50 |
+| ransac_zones | 11.6 | 30 % | 5 % | 0.56 |
+| grid_resid | 11.6 | 31 % | 2 % | 0.53 |
+| czm | 11.1 | 24 % | 6 % | 0.56 |
+| gpf | 10.4 | 14 % | 10 % | 0.49 |
+| ransac_rings | 9.5 | 10 % | 20 % | 0.51 |
+
+On the worst scans RANSAC keeps 4 cones where `ray_slope` keeps 9–12, and every extra cone
+casts a LiDAR shadow behind it, so they are real. `ray_slope` never loses cones against
+RANSAC and doesn't add corridor detections, so it is the one ported. A labelled set is still
+needed to measure precision properly. The NPU is not needed for this: local ground fitting on
+the CPU recovers the lost cones.
+
+```mermaid
+xychart-beta
+    title "Cones per scan on the manual-run recording (higher = fewer lost)"
+    x-axis ["ransac", "gpf", "ransac_rings", "czm", "ray_slope", "ransac_zones", "grid_resid"]
+    y-axis "cones / scan" 0 --> 14
+    bar [10.1, 10.4, 9.5, 11.1, 11.5, 11.6, 11.6]
+```
+
+**The port.** `ray_slope` is now one Numba kernel (`ground_methods.ray_slope_kernel`) that the
+python and fused paths both call, and `cone_detection_core` ports it 1:1 to C++. Its plane fits
+use a fixed-sweep 3×3 Jacobi eigen solve instead of LAPACK, so Numba and C++ do the same
+arithmetic. `test_cpp_detect.py` checks the ground mask and plane bit for bit, and the
+detector output against fused, on the synthetic scenes and a scene with a hill. Against the
+old numpy version the mask is identical on 44 real scans (plane within 1e-14), and it runs
+2.9× faster.
+
+```mermaid
+flowchart LR
+    A[cropped cloud] --> G["GPF prior plane<br/>(20 k-point subsample)"]
+    G --> H["height above prior,<br/>range, 1° azimuth sector"]
+    H --> S["sort each sector<br/>by range"]
+    S --> W["walk each ray outwards:<br/>ground while slope ≤ 6°<br/>and |height| ≤ 0.10 m"]
+    W --> R[refit plane on ground]
+    R --> O[outliers → rotate → cluster]
+```
+
+**Cost on the RK3588** (A76 core 4 idle, 80 real scans × 2):
+
+| backend + ground | detect p50 / p95 | ground step p50 | cones / scan |
+|---|---|---|---|
+| cpp + ransac | 13.9 / 20.0 ms | 1.0 ms | 9.4 |
+| **cpp + ray_slope** | **37–43 / 43–49 ms** | 26–30 ms | **11.5** |
+| fused + ransac | 15.6 / 22.3 ms | 1.3 ms | 9.4 |
+| fused + ray_slope | 70 / 79 ms | 56 ms | 11.5 |
+
+```mermaid
+xychart-beta
+    title "Detect p95 on the RK3588 (ms), budget 60 ms"
+    x-axis ["cpp ransac", "cpp ray_slope", "fused ransac", "fused ray_slope"]
+    y-axis "ms" 0 --> 100
+    bar [20.0, 49.2, 22.3, 80.1]
+    line [60, 60, 60, 60]
+```
+
+`cpp + ray_slope` fits the budget with the board idle. Clustering gets about 2 ms cheaper
+because less ground reaches it, but the walk costs 25 ms more. Where those 26 ms go (C++,
+one real scan): `hypot` + `atan2` 9.2, sort + walk 8.3, GPF prior 5.4, bucketing 1.4, refit
+1.5. Before it becomes the default it needs (a) to get cheaper, for example walking the
+LiDAR's own column order instead of sorting by azimuth, and (b) a HIL run and a car check.
+`ransac` stays the default.
 
 ## Where the time goes now
 

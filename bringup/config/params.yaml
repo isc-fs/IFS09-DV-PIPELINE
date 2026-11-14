@@ -71,6 +71,7 @@ slam_node:
     min_observations_for_publish: 3
     cone_map_publish_radius_m: 25.0
     cone_map_full_publish_every_n_scans: 50
+    cone_map_full_delta_every_n_scans: 5
     cascade_skip_recovery_threshold: 5
     freeze_mapping_on_loop_close: true
     loop_close_radius_m: 6.0

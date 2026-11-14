@@ -23,7 +23,7 @@ def _bake_module():
     return mod
 
 
-def test_bake_uses_params_yaml_and_both_detector_backends(tmp_path):
+def test_bake_uses_params_yaml_and_every_detector_backend(tmp_path):
     with open(PARAMS) as fh:
         data = yaml.safe_load(fh)
     data["cone_detection_node"]["ros__parameters"]["cluster_backend"] = "grid"
@@ -32,7 +32,9 @@ def test_bake_uses_params_yaml_and_both_detector_backends(tmp_path):
     edited.write_text(yaml.safe_dump(data))
 
     cfgs = _bake_module().cone_detection_configs(str(edited))
-    assert sorted(c.detector_backend for c in cfgs) == ["fused", "python"]
+    shipped = data["cone_detection_node"]["ros__parameters"]["detector_backend"]
+    # the shipped backend plus both Numba ones (cpp falls back to fused, then python)
+    assert sorted(c.detector_backend for c in cfgs) == sorted({shipped, "fused", "python"})
     for c in cfgs:
         assert c.cluster_backend == "grid"
         assert c.dbscan_eps == 0.25

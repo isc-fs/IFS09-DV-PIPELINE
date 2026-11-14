@@ -163,12 +163,12 @@ class ConeDetectionConfig:
 
     # Detector implementation:
     # * "python": the numpy pipeline in cone_detection.py.
-    # * "fused" (default): the same scan in about ten Numba calls
+    # * "fused": the same scan in about ten Numba calls
     #   (cone_detection/fused.py). It gives identical cones and counters, and
     #   detect() takes about 2-2.5x less time. On the RK3588 under contention,
     #   detect p95 is 29 ms (python: 64 ms, over PERF-01's 60 ms).
     # "fused" runs only where it is exact:
-    # * ground_method "ransac";
+    # * ground_method "ransac" or "ray_slope";
     # * fit_backend "template_dispatch" with cone_fit_solver "gn";
     # * flat_cell_filter off;
     # * an (N, 3) float cloud.
@@ -176,4 +176,6 @@ class ConeDetectionConfig:
     # * "cpp": the fused kernels ported 1:1 to C++ (perception_cpp/cone_detection_core,
     #   pybind11; cone_detection/cpp_backend.py). Same output as "fused", same
     #   limits; falls back to "fused" with one warning when the module is not built.
-    detector_backend: str = "fused"
+    #   The default: in HIL it took about a fifth less detection CPU than "fused"
+    #   (docs/arm_optimization/validation.md).
+    detector_backend: str = "cpp"

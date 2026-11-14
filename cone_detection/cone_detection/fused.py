@@ -44,6 +44,14 @@ import numpy as np
 
 from cone_detection.clustering import fast_dbscan
 from cone_detection.ransac import sample_without_replacement
+from cone_detection.ground_methods import (
+    RAY_SLOPE_MAX_GAP_M,
+    RAY_SLOPE_MAX_HEIGHT_M,
+    RAY_SLOPE_MAX_SLOPE,
+    RAY_SLOPE_SECTORS,
+    _FIT_MAX_POINTS,
+    ray_slope_kernel,
+)
 from cone_detection.cone_fit import (
     _CONE_BASE_RADIUS_M,
     _CONE_BIG_C,
@@ -71,10 +79,27 @@ N_CLUSTERS, AFTER_MIN_PTS, AFTER_SHAPE_GATE, ACCEPTED, FAR_DROPPED = 0, 1, 2, 3,
 SMALL, BIG, AMBIGUOUS, SHAPE_REJECTED, RESIDUAL_REJECTED = 5, 6, 7, 8, 9
 
 
+# Ground methods the fused (and cpp) path runs. ray_slope is one Numba kernel
+# shared with the python path, so it is exact by construction.
+FUSED_GROUND_METHODS = ("ransac", "ray_slope")
+
+
+def ray_slope_args(cfg) -> tuple:
+    """ray_slope_kernel's arguments after the cloud (the cpp core takes the same)."""
+    return (
+        float(cfg.ransac_threshold),
+        RAY_SLOPE_MAX_SLOPE,
+        RAY_SLOPE_MAX_GAP_M,
+        RAY_SLOPE_MAX_HEIGHT_M,
+        RAY_SLOPE_SECTORS,
+        _FIT_MAX_POINTS,
+    )
+
+
 def fused_unsupported_reason(cfg, data, clustering_class) -> str | None:
     """``None`` when the fused path reproduces ``cfg`` exactly, else why not."""
-    if cfg.ground_method != "ransac":
-        return f"ground_method={cfg.ground_method!r} (fused: 'ransac' only)"
+    if cfg.ground_method not in FUSED_GROUND_METHODS:
+        return f"ground_method={cfg.ground_method!r} (fused: {', '.join(FUSED_GROUND_METHODS)} only)"
     if cfg.fit_backend != "template_dispatch":
         return f"fit_backend={cfg.fit_backend!r} (fused: 'template_dispatch' only)"
     if cfg.cone_fit_solver != "gn":
@@ -686,6 +711,8 @@ def run_scan(
     if len(pts) < 3:  # remove_ground: no plane to fit, everything is an outlier
         outl = np.ones(len(pts), dtype=np.bool_)
         coefs = _DEFAULT_PLANE.copy()
+    elif cfg.ground_method == "ray_slope":
+        outl, coefs = ray_slope_kernel(pts, *ray_slope_args(cfg))
     else:
         warm = (
             np.asarray(initial_plane, dtype=np.float64)

@@ -61,6 +61,12 @@ Plane ransac_plane(const Cloud& xyz, double prob, double threshold, int64_t max_
                    int64_t n_sub_max, const std::vector<double>& warm, NumbaMt& rng,
                    std::vector<uint8_t>& outliers);
 
+// ground_methods.ray_slope_kernel: per-azimuth ray walk on height above a GPF
+// prior, then a plane refit on the ground returns. outliers gets one flag per point.
+Plane ray_slope_ground(const Cloud& xyz, double thr, double max_slope, double max_gap,
+                       double max_height, int64_t n_sectors, int64_t fit_cap,
+                       std::vector<uint8_t>& outliers);
+
 std::vector<uint8_t> plane_outliers(const Cloud& xyz, const Plane& p, double threshold);
 
 using Mat3 = std::array<double, 9>;  // row-major

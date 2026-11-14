@@ -57,16 +57,20 @@ flowchart LR
 1. rclcpp lifecycle component next to the Hesai driver (zero-copy intra-process), on
    `cone_detection_core`. It needs a native version of the voxel guard's random fallback
    (Python's `default_rng` today; rare) and the seed CRC.
-2. Local ground segmentation (SW-02b). It would remove about 3/4 of the clustering input,
-   taking clustering from about 7 ms to 2–3 ms.
+2. Local ground segmentation (SW-02b). `ray_slope` is ported to C++ and keeps about 22 %
+   more cones on the sloped manual-run recording ([detection, section 8](detection.md#8-local-ground-ray_slope-sw-02b)),
+   but costs 26–30 ms per scan (detect p95 49 ms, budget 60). Make the walk cheaper (use the
+   LiDAR's column order instead of sorting by azimuth), label a few dozen scans to measure
+   precision, then a HIL run before making it the default.
 3. Decimation or FOV crop (SW-01). It meets budget on its own, but it grew the map from 188
    to 240 cones, so it needs a recall check first.
 4. SLAM: vectorise data association and read estimates incrementally. Not needed for budget
    today.
 5. Planning in C++: not needed.
-6. Core 6 (planning + control) sits at about 99 %. Profile it on the car bag the way SLAM was
-   ([validation](validation.md#slams-core-stop-waking-for-inputs-it-drops)); SLAM's core went
-   from 72 to 30 % once it stopped waking for inputs it drops.
+6. ~~Core 6 (planning + control) at 99 %.~~ Done: flat `ConeArray` messages and control on
+   core 7 take planning latency from 42 to 20 ms p50 and core 6 to 67 %
+   ([validation](validation.md#planning-flat-cone-arrays-and-a-core-of-its-own)). **Core 7 is now
+   at 96 %** (control, odometry filter, network interrupts). Profile control next.
 7. C++ clustering: a hash grid instead of the sorted-key search. Clustering is 6.4 ms of
    the 11.7 ms cpp detect. Do it after SW-02b, which shrinks its input. Also make crop
    skip the zero-fill (0.25 ms).

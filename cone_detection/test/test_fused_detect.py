@@ -74,6 +74,18 @@ def _scene(*, wall=False, blob=0, tilt=0.02, height=-1.05, n_ground=12000):
     return pts[RNG.permutation(len(pts))].astype(np.float32)
 
 
+def _bent_scene(grade=0.08, knee_m=8.0):
+    """_scene on ground that climbs ``grade`` beyond x = ``knee_m`` (cones ride on it).
+
+    One plane cannot hold both parts: global RANSAC labels the hill as obstacles,
+    the case ray_slope exists for (seen on the manual-run recording).
+    """
+    pts = _scene(tilt=0.0).astype(np.float64)
+    live = np.abs(pts).sum(1) > 0
+    pts[live, 2] += grade * np.maximum(0.0, pts[live, 0] - knee_m)
+    return pts.astype(np.float32)
+
+
 def _run(cfg, scans, **kw):
     det = RealtimeConeDetector(cfg)
     out = []
@@ -246,3 +258,39 @@ def test_scan_seed_depends_on_content():
     assert scan_seed(a) != scan_seed(b)
     assert scan_seed(a) != scan_seed(a[:-1])
     assert 0 <= scan_seed(a) < 2**32
+
+
+# --------------------------------------------------------------------------
+# ray_slope ground: one Numba kernel shared by the python and fused paths
+# --------------------------------------------------------------------------
+def test_fused_equals_python_ray_slope(scans):
+    cfg = ConeDetectionConfig(cluster_backend="grid", ground_method="ray_slope")
+    assert fused.fused_unsupported_reason(cfg, scans[0], None) is None
+    py = _assert_same(cfg, scans + [_bent_scene()])
+    assert all(r["counters"]["accepted"] >= 8 for r in py)
+
+
+def _true_cones():
+    """Centres of the cones _scene places (ring + collinear line; the far one is gated)."""
+    ring = [
+        ((3.0 + 1.4 * k) * math.cos(2 * math.pi * k / 12), (3.0 + 1.4 * k) * math.sin(2 * math.pi * k / 12))
+        for k in range(12)
+    ]
+    return np.array(ring + [(5.0 + 0.9 * k, 0.05) for k in range(4)])
+
+
+def _found_and_false(cones, truth, tol=0.3):
+    if len(cones) == 0:
+        return 0, 0
+    d = np.hypot(cones[:, None, 0] - truth[None, :, 0], cones[:, None, 1] - truth[None, :, 1])
+    return int((d.min(0) < tol).sum()), int((d.min(1) >= tol).sum())
+
+
+def test_ray_slope_on_a_hill_finds_more_cones_with_fewer_false_ones():
+    scene, truth = [_bent_scene(grade=0.08, knee_m=8.0)], _true_cones()
+    rs = _run(ConeDetectionConfig(ground_method="ray_slope", detector_backend="fused"), scene)
+    ra = _run(ConeDetectionConfig(ground_method="ransac", detector_backend="fused"), scene)
+    rs_found, rs_false = _found_and_false(rs[0]["cones"], truth)
+    ra_found, ra_false = _found_and_false(ra[0]["cones"], truth)
+    assert rs_found >= ra_found
+    assert rs_false < ra_false

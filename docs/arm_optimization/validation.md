@@ -602,6 +602,79 @@ xychart-beta
     bar [105.8, 70.2, 80.8, 85.6]
 ```
 
+### Planning: flat cone arrays and a core of its own
+
+py-spy on the core-6 nodes showed where planning's 42 ms went. About a third was rclpy
+decoding the `/Conos` MarkerArray (18.7 ms per message), a third was planning itself, and
+7 % went on debug markers. Control shared the core. Three changes:
+
+1. **`dv_msgs/ConeArray`** (flat `x`, `y`, `z`, `height`, `sigma_xy`, `id` arrays) carries
+   the cones on the three hops: detection → SLAM (`/cones_raw`), detection → control
+   (`/cones_orange`), SLAM → planning (`/cones`). The MarkerArrays (`/Conos_raw`,
+   `/Conos_Orange`, `/Conos`) stay for viewers and are only built when something subscribes.
+2. Planning's debug markers are only built when something subscribes.
+3. Control moves to core 7 with the odometry filter (`DV_CPU_PIN` in `deploy/rk3588.env`).
+
+```mermaid
+flowchart LR
+    subgraph Before
+        D1[detection] -->|MarkerArray /Conos_raw| S1[SLAM] -->|MarkerArray /Conos<br/>18.7 ms decode| P1["planning<br/>core 6"]
+        D1 -->|MarkerArray /Conos_Orange| C1["control<br/>core 6"]
+    end
+    subgraph After
+        D2[detection] -->|ConeArray /cones_raw| S2[SLAM] -->|ConeArray /cones| P2["planning<br/>core 6"]
+        D2 -->|ConeArray /cones_orange| C2["control<br/>core 7"]
+    end
+```
+
+Full HIL check, cpp backend both times (`hil_v8_cpp` before, `hil_v10_conearray` after):
+
+| | before | after |
+|---|---|---|
+| Missions finished, watchdog trips | 10 / 10, 0 | 10 / 10, 0 |
+| **Planning latency p50 / p95 / p99** | 42.4 / 52.6 / 57.0 ms | **20.1 / 22.5 / 23.7 ms** |
+| Seconds with `/Path` under 9.5 Hz | 24 % | 12 % |
+| Core 6 p50, time above 95 % | 100 %, 94 % | **67 %, 0 %** |
+| Core 7 p50 | 26 % | 96 % |
+| SLAM latency p50 / p99 | 15.9 / 34.2 ms | 18.7 / 34.3 ms |
+| Total mission time | 4,015 s | 4,074 s |
+| Cones hit | 23 | 24 |
+
+```mermaid
+xychart-beta
+    title "Planning latency before / after (ms, budget 100 ms per scan)"
+    x-axis ["p50", "p95", "p99"]
+    y-axis "ms" 0 --> 100
+    bar [42.4, 52.6, 57.0]
+    bar [20.1, 22.5, 23.7]
+    line [100, 100, 100]
+```
+
+```mermaid
+xychart-beta
+    title "A76 core load while driving, before / after (%, budget 100)"
+    x-axis ["core 4 detection", "core 5 SLAM", "core 6 planning", "core 7 control+odometry+IRQ"]
+    y-axis "% of core" 0 --> 100
+    bar [34, 62, 99, 26]
+    bar [35, 73, 66, 95]
+    line [100, 100, 100, 100]
+```
+
+Planning latency halves and its core is no longer saturated. Two costs show up in this
+setup:
+
+- **Core 7 is now at 96 %.** Control used 50 % of a core when it shared core 6. Alone, it
+  takes 71 %: it now handles every `/odom` and `/tf` message instead of the ones a starved
+  core left it. The network interrupts on core 7 kept up (frame drops 393 against 431 before,
+  UDP errors 121 against 68), but there is no headroom. Next: profile control the way planning
+  was profiled.
+- **SLAM's CPU rose from 61 to 73 %.** The box's recorder subscribes to every topic, so in
+  HIL SLAM builds the old `/Conos` MarkerArray as well as the new ConeArray. On the car,
+  without a viewer or a recorder on `/Conos`, the marker build is skipped.
+
+Trackdrive took 2.9 % longer in total and autocross 11 % less. With one session each, both
+are within run-to-run noise.
+
 ### Open
 
 1. ~~**Scan drops cause the watchdog trips.**~~ Fixed above (IP reassembly on the Pi). Every trip is `/slam/pose` silent for 0.62–0.63 s:
@@ -612,5 +685,6 @@ xychart-beta
    specific to the HIL setup: on the car the LiDAR's packets arrive spread evenly over each
    rotation. The next lever is pacing the box's sender.
 2. ~~Core 5 saturated outside SLAM's algorithms.~~ Fixed above: 72 → 30 % on the car bag.
-   **Core 6 still is**: planning and control sit at about 99 %. Planning computes about 50 ms
-   per scan, and control shares its core. Profile it the same way before changing anything.
+   ~~Core 6 still is.~~ Fixed above: flat cone arrays and control on its own core take core 6
+   from 99 to 67 % and planning latency from 42 to 20 ms p50. **Core 7 is at 96 % now**
+   (control, odometry filter, network interrupts); profile control next.

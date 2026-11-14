@@ -17,7 +17,8 @@ from cone_detection import cpp_backend, fused  # noqa: E402
 from cone_detection.clustering import _grid_components  # noqa: E402
 from cone_detection.cone_detection import ConeDetectionConfig, RealtimeConeDetector  # noqa: E402
 from cone_detection.ransac import sample_without_replacement  # noqa: E402
-from test_fused_detect import _scene  # noqa: E402
+from cone_detection.ground_methods import ray_slope_kernel  # noqa: E402
+from test_fused_detect import _bent_scene, _scene  # noqa: E402
 
 RNG = np.random.default_rng(41)
 
@@ -175,3 +176,31 @@ def test_fit_clusters_matches_numba(scans):
     rows_cp, cnt_cp = core.fit_clusters(pts, labels, p.tolist())
     np.testing.assert_array_equal(cnt_cp, cnt_nb)
     np.testing.assert_allclose(rows_cp, rows_nb, rtol=0, atol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# ray_slope ground
+# --------------------------------------------------------------------------
+def test_cpp_equals_fused_ray_slope(scans):
+    fu = _assert_same(ConeDetectionConfig(ground_method="ray_slope"), scans + [_bent_scene()])
+    assert all(r["counters"]["accepted"] >= 8 for r in fu)
+
+
+def test_ray_slope_kernel_matches_numba(scans):
+    cfg = ConeDetectionConfig()
+    for scan in scans + [_bent_scene()]:
+        xyz = scan.astype(np.float64)
+        o_nb, c_nb = ray_slope_kernel(xyz, *fused.ray_slope_args(cfg))
+        o_cp, c_cp = core.ray_slope_ground(xyz, *fused.ray_slope_args(cfg))
+        np.testing.assert_array_equal(o_cp, o_nb)
+        np.testing.assert_array_equal(np.asarray(c_cp), c_nb)  # bit for bit
+
+
+def test_ray_slope_kernel_tiny_clouds_match_numba():
+    cfg = ConeDetectionConfig()
+    for n in (3, 4, 7):
+        xyz = RNG.uniform(-2.0, 2.0, (n, 3))
+        o_nb, c_nb = ray_slope_kernel(xyz, *fused.ray_slope_args(cfg))
+        o_cp, c_cp = core.ray_slope_ground(xyz, *fused.ray_slope_args(cfg))
+        np.testing.assert_array_equal(o_cp, o_nb)
+        np.testing.assert_array_equal(np.asarray(c_cp), c_nb)

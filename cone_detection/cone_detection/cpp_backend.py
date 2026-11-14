@@ -4,7 +4,7 @@ The fused kernels of :mod:`cone_detection.fused` ported 1:1 to C++
 (``perception_cpp/cone_detection_core``, a pybind11 module). The scan runs in two
 calls that release the GIL:
 
-* ``Core.front``: crop, RANSAC, rotate, tall-column veto, voxel guard;
+* ``Core.front``: crop, ground (RANSAC or ray_slope), rotate, tall-column veto, voxel guard;
 * ``Core.back``: grid clustering (unless another ``cluster_backend`` supplied the
   labels) and the per-cluster gates and fits.
 
@@ -102,6 +102,8 @@ def run_scan(
         float(cfg.dbscan_guard_voxel_m),
         float(cfg.dbscan_guard_voxel_max_m),
         bool(keep_cropped),
+        1 if cfg.ground_method == "ray_slope" else 0,
+        list(fused.ray_slope_args(cfg)[1:]) if cfg.ground_method == "ray_slope" else [],
     )
     out.cropped = cropped if cropped is not None else np.empty((n_cropped, 0))
     st["crop_ms"] = t["crop_ms"]
