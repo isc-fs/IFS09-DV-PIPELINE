@@ -73,6 +73,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Bool, Float32
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
+from dv_msgs.msg import ConeArray
 
 
 def _odom_to_pose3(msg: Odometry) -> "gtsam.Pose3":
@@ -538,6 +539,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._tf_broadcaster = None
         self._state_pub = None
         self._cones_pub = None
+        self._cones_array_pub = None
         self._cones_full_pub = None
         # /Conos_full delta state: last published position per landmark id.
         # We publish only new/moved cones each scan and let the viewer hold
@@ -701,6 +703,10 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         # SLAM-absolute, drift-corrected; map→odom→base_link chain
         # resolves to the same value via TF).
         self._state_pub = self.create_lifecycle_publisher(Odometry, "/slam/pose", 10)
+        # /cones (dv_msgs/ConeArray) is what the planner reads; /Conos carries the
+        # same cones as MarkerArray for viewers and recorders, built only when
+        # something subscribes (MarkerArray is costly to build and decode in rclpy).
+        self._cones_array_pub = self.create_lifecycle_publisher(ConeArray, "/cones", 10)
         self._cones_pub = self.create_lifecycle_publisher(MarkerArray, "/Conos", 10)
         # Full (uncropped) cone map for visualization only. /Conos is
         # cropped to a local radius for the planner (per-scan O(local)
@@ -832,11 +838,12 @@ class ConeGraphSlamNode(BaseLifecycleNode):
             durability=QoSDurabilityPolicy.VOLATILE,
         )
         self._sub_imu = self.create_subscription(Imu, "/imu", self._on_imu, imu_qos)
-        # /Conos_raw is the scan trigger AND the source of cone
+        # /cones_raw is the scan trigger AND the source of cone
         # observations. Cone_Detection publishes ~10 Hz, in base_link
-        # frame, with cone height encoded on marker.scale.z.
+        # frame (dv_msgs/ConeArray: height and sigma_xy per cone).
+        # _on_cones also accepts the legacy MarkerArray (replay of old bags).
         self._sub_cones = self.create_subscription(
-            MarkerArray, "/Conos_raw", self._on_cones, 10
+            ConeArray, "/cones_raw", self._on_cones, 10
         )
 
         # /motor_rpm — bridge publishes at 100 Hz from getCarState().
@@ -998,6 +1005,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         for pub in (
             self._state_pub,
             self._cones_pub,
+            self._cones_array_pub,
             self._cones_full_pub,
             self._gt_aligned_pub,
             self._gt_error_pub,
@@ -1013,6 +1021,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 self.destroy_publisher(pub)
         self._state_pub = None
         self._cones_pub = None
+        self._cones_array_pub = None
         self._cones_full_pub = None
         self._full_pub_last = {}
         self._gt_aligned_pub = None
@@ -1284,7 +1293,7 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 "until the next activate"
             )
 
-    def _on_cones(self, msg: MarkerArray) -> None:
+    def _on_cones(self, msg: "ConeArray | MarkerArray") -> None:
         if self._state != State.SLAM_RUNNING:
             return
         self._drop_init_only_subs()
@@ -1873,8 +1882,11 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         self._obs_last_log_ns = now_ns
 
     @staticmethod
-    def _stamp_msg(msg: MarkerArray):
+    def _stamp_msg(msg: "ConeArray | MarkerArray"):
         """Return this scan's LiDAR stamp, or None if the array is empty.
+
+        A ConeArray always carries the scan stamp in its header, even with no
+        cones. The rest describes the legacy MarkerArray input (old bags).
 
         MarkerArray has no top-level header. Cone_Detection stamps every
         marker (ADD and the DELETEALL leader) from the originating LiDAR
@@ -1884,6 +1896,8 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         (which is ~now and then makes the next LiDAR-stamped TF look
         like TF_OLD_DATA).
         """
+        if isinstance(msg, ConeArray):
+            return msg.header.stamp
         fallback = None
         for m in msg.markers:
             if m.action != Marker.DELETEALL:
@@ -1893,8 +1907,23 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         return fallback
 
     @staticmethod
-    def _observations_from_markers(msg: MarkerArray) -> list[Observation]:
+    def _observations_from_markers(msg: "ConeArray | MarkerArray") -> list[Observation]:
         out: list[Observation] = []
+        if isinstance(msg, ConeArray):
+            r2max = MAX_OBSERVATION_RANGE_M * MAX_OBSERVATION_RANGE_M
+            for x, y, h, s in zip(msg.x, msg.y, msg.height, msg.sigma_xy):
+                if (x * x + y * y) > r2max:
+                    continue
+                out.append(
+                    Observation(
+                        body_x=float(x),
+                        body_y=float(y),
+                        # The MarkerArray path saw max(0.1, h) (display clamp).
+                        height=max(0.1, float(h)),
+                        sigma_xy=float(s) if s > 0.0 else -1.0,
+                    )
+                )
+            return out
         for m in msg.markers:
             # The first marker in the array is action=DELETEALL with
             # placeholder pose — Cone_Detection uses it to clear stale
@@ -2629,7 +2658,15 @@ class ConeGraphSlamNode(BaseLifecycleNode):
         else:
             radius_sq = None
 
+        want_markers = self._has_subscribers(self._cones_pub)
         out = MarkerArray()
+        arr = ConeArray()
+        arr.header.stamp = stamp
+        arr.header.frame_id = self.map_frame
+        ax: list[float] = []
+        ay: list[float] = []
+        az: list[float] = []
+        aid: list[int] = []
         # First marker is DELETEALL so visualizers refresh cleanly.
         # Phase 2 (#382): /Conos now lives in map frame, not odom.
         # Landmark positions in self._db were always SLAM-absolute;
@@ -2660,10 +2697,22 @@ class ConeGraphSlamNode(BaseLifecycleNode):
                 if ddx * ddx + ddy * ddy > radius_sq:
                     n_cropped += 1
                     continue
-            out.markers.append(self._cone_marker(lm, stamp))
+            ax.append(float(lm.position[0]))
+            ay.append(float(lm.position[1]))
+            az.append(float(lm.position[2]))
+            aid.append(int(lm.id))
+            if want_markers:
+                out.markers.append(self._cone_marker(lm, stamp))
             n_published += 1
 
-        self._cones_pub.publish(out)
+        arr.x, arr.y, arr.z, arr.id = ax, ay, az, aid
+        n = len(ax)
+        arr.height = [0.0] * n
+        arr.sigma_xy = [-1.0] * n
+        if self._cones_array_pub is not None:
+            self._cones_array_pub.publish(arr)
+        if want_markers:
+            self._cones_pub.publish(out)
 
         # Full uncropped map for visualization on /Conos_full. Published
         # every scan as a DELTA (only new/moved cones) so the cost is

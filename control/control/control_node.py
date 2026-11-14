@@ -39,6 +39,7 @@ from fs_msgs.msg import ControlCommand
 from nav_msgs.msg import Odometry, Path
 from std_msgs.msg import Bool, Float32
 from visualization_msgs.msg import Marker, MarkerArray
+from dv_msgs.msg import ConeArray
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 from transforms3d.euler import quat2euler
@@ -273,8 +274,10 @@ class ControlNode(BaseLifecycleNode):
         # tracking has fresh data every 40 Hz tick.
         self._sub_odom = self.create_subscription(
             Odometry, "/odom", self._on_odom, 10)
+        # dv_msgs/ConeArray (big-orange cones, base_link). The /Conos_Orange
+        # MarkerArray is for viewers only; it is costly to decode in rclpy.
         self._sub_orange = self.create_subscription(
-            MarkerArray, "/Conos_Orange", self._on_orange, 10)
+            ConeArray, "/cones_orange", self._on_orange, 10)
         # /slam/final_lap — "the next finish gate is the closing one". SLAM
         # publishes it TRANSIENT_LOCAL; match durability or we would never
         # receive the value it latched before we activated, and trackdrive
@@ -633,7 +636,7 @@ class ControlNode(BaseLifecycleNode):
                 + ("" if value else " — holding stop anchor until the closing lap"))
         self._final_lap = value
 
-    def _on_orange(self, msg: MarkerArray) -> None:
+    def _on_orange(self, msg: "ConeArray | MarkerArray") -> None:
         """Latch a stop anchor on the first tick we see ≥2 big-orange cones,
         AFTER the car has travelled at least stop_latch_min_travel metres
         from origin. The minimum-travel gate exists because the FS start
@@ -657,8 +660,12 @@ class ControlNode(BaseLifecycleNode):
         # cone_detection_node leads every array with a pose-less DELETEALL
         # marker (viewer refresh); only ADD markers are cones. Including the
         # leader in the centroid would pull the gate toward the origin.
-        cones = [m for m in msg.markers if m.action != Marker.DELETEALL]
-        if len(cones) < 2:
+        if isinstance(msg, ConeArray):
+            xy = list(zip(msg.x, msg.y))
+        else:  # legacy MarkerArray (old bags, tests)
+            xy = [(m.pose.position.x, m.pose.position.y)
+                  for m in msg.markers if m.action != Marker.DELETEALL]
+        if len(xy) < 2:
             return
         min_travel = self.get_parameter("stop_latch_min_travel").value
         if self._travelled < min_travel:
@@ -682,9 +689,9 @@ class ControlNode(BaseLifecycleNode):
         if self._travelled - self._final_lap_from < min_travel:
             return
         # Centroid in base_link
-        n = len(cones)
-        sx = sum(m.pose.position.x for m in cones) / n
-        sy = sum(m.pose.position.y for m in cones) / n
+        n = len(xy)
+        sx = sum(x for x, _ in xy) / n
+        sy = sum(y for _, y in xy) / n
         # base_link → odom using current absolute pose from SLAM
         o = self._latest_pose
         q = o.pose.pose.orientation

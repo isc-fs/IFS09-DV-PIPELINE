@@ -67,6 +67,7 @@ from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
 from visualization_msgs.msg import Marker, MarkerArray
+from dv_msgs.msg import ConeArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import Point, PoseStamped
 from std_msgs.msg import Float32
@@ -311,16 +312,18 @@ class PathPlanningNode(BaseLifecycleNode):
     def on_activate(
         self, state: LifecycleState
     ) -> TransitionCallbackReturn:
-        self.get_logger().info("on_activate: subscribing to /Conos")
+        self.get_logger().info("on_activate: subscribing to /cones")
         self._reset_stats()
+        # dv_msgs/ConeArray, not the /Conos MarkerArray: decoding a 36-cone
+        # MarkerArray took 18.7 ms in rclpy on the RK3588, more than planning.
         self._sub = self.create_subscription(
-            MarkerArray, "Conos", self._on_cones, 10)
+            ConeArray, "cones", self._on_cones, 10)
         return super().on_activate(state)
 
     def on_deactivate(
         self, state: LifecycleState
     ) -> TransitionCallbackReturn:
-        self.get_logger().info("on_deactivate: dropping /Conos subscription")
+        self.get_logger().info("on_deactivate: dropping /cones subscription")
         if self._sub is not None:
             self.destroy_subscription(self._sub)
             self._sub = None
@@ -414,7 +417,7 @@ class PathPlanningNode(BaseLifecycleNode):
     # ------------------------------------------------------------------
     # Cone callback (unchanged behaviour from pre-lifecycle version)
     # ------------------------------------------------------------------
-    def _on_cones(self, msg: MarkerArray) -> None:
+    def _on_cones(self, msg: "ConeArray | MarkerArray") -> None:
         # Defensive: subscription is destroyed before publishers in
         # on_deactivate, but a callback already inflight when deactivate
         # fires can race past that.
@@ -425,13 +428,16 @@ class PathPlanningNode(BaseLifecycleNode):
         self._stats["callbacks"] += 1
 
         cones: List[Cone] = []
-        for m in msg.markers:
-            if m.action == Marker.DELETEALL:
-                continue
-            cones.append(Cone(
-                x=float(m.pose.position.x),
-                y=float(m.pose.position.y),
-            ))
+        if isinstance(msg, ConeArray):
+            cones = [Cone(x=float(x), y=float(y)) for x, y in zip(msg.x, msg.y)]
+        else:  # legacy MarkerArray (old bags, tests)
+            for m in msg.markers:
+                if m.action == Marker.DELETEALL:
+                    continue
+                cones.append(Cone(
+                    x=float(m.pose.position.x),
+                    y=float(m.pose.position.y),
+                ))
 
         if not cones:
             self._stats["no_cones"] += 1
@@ -469,10 +475,13 @@ class PathPlanningNode(BaseLifecycleNode):
 
         path_points, debug = self._adapter.plan(cones, pose)
 
-        # Always publish the debug overlay (even when the path is empty —
-        # shows what cones FaSTTUBe assigned to each side, which is the
-        # most useful signal when the planner just gave up).
-        self.publisher_debug.publish(_build_debug_markers(debug))
+        # Debug overlay (published even when the path is empty: it shows which
+        # cones FaSTTUBe assigned to each side, the most useful signal when the
+        # planner gave up). Built only when something subscribes: building and
+        # publishing the MarkerArray every tick cost about 7 % of the planning
+        # process on the RK3588 (py-spy, HIL trackdrive).
+        if self._has_subscribers(self.publisher_debug):
+            self.publisher_debug.publish(_build_debug_markers(debug))
 
         # Tick capture: dump (cones, pose, path xy) for offline replay
         # and path-vs-CSV-centerline analysis (#254). Path is dumped as
@@ -519,6 +528,19 @@ class PathPlanningNode(BaseLifecycleNode):
             tf_miss=0.0,
         )
         self._publish_latency_ms(t0)
+
+    @staticmethod
+    def _has_subscribers(pub) -> bool:
+        """True when ``pub`` has a subscriber, or when that can't be told (fail open)."""
+        if pub is None:
+            return False
+        getter = getattr(pub, "get_subscription_count", None)
+        if getter is None:
+            return True
+        try:
+            return int(getter()) > 0
+        except Exception:
+            return True
 
     def _publish_if_sub(self, pub, value: float) -> None:
         if pub is None:

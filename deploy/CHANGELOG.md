@@ -50,8 +50,8 @@ DVPC, the sim CI, laptops) nothing changes. Layout:
 | 0-3 (A55) | unpinned: mode manager, mission control, watchdog, sim supervisor, LiDAR driver, recorder, the launch, the OS |
 | 4 (A76) | cone detection |
 | 5 (A76) | SLAM |
-| 6 (A76) | path planning, control |
-| 7 (A76) | odometry filter, network interrupts |
+| 6 (A76) | path planning |
+| 7 (A76) | control, odometry filter, network interrupts |
 
 Unlisted processes float on cores 0-3.
 

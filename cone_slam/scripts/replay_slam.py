@@ -49,9 +49,11 @@ from typing import Optional
 import numpy as np
 
 
+# Cone observations: /cones_raw (dv_msgs/ConeArray) in new bags, /Conos_raw
+# (MarkerArray) in older ones. slam_node._on_cones takes either.
+CONE_TOPICS = ("/cones_raw", "/Conos_raw")
 REQUIRED_TOPICS = {
     "/imu",
-    "/Conos_raw",
     "/motor_rpm",
     "/odom",
     "/testing_only/odom",
@@ -128,6 +130,11 @@ def main() -> int:
     reader = _open_bag(args.bag)
     topic_classes = _topic_msg_classes(reader)
     missing = REQUIRED_TOPICS - set(topic_classes.keys())
+    # One cone topic only (a bag may hold both; feeding both would double every scan).
+    cone_topic = next((t for t in CONE_TOPICS if t in topic_classes), None)
+    if cone_topic is None:
+        missing = missing | {" or ".join(CONE_TOPICS)}
+    wanted = REQUIRED_TOPICS | {cone_topic}
     if missing:
         print(f"bag missing required topics: {sorted(missing)}",
               file=sys.stderr)
@@ -204,7 +211,7 @@ def main() -> int:
         # which is the right order for replay.
         while reader.has_next():
             topic, raw, t_ns = reader.read_next()
-            if topic not in REQUIRED_TOPICS:
+            if topic not in wanted:
                 continue
             cls = topic_classes[topic]
             msg = deserialize_message(raw, cls)
@@ -221,7 +228,7 @@ def main() -> int:
                 elif topic == "/testing_only/odom":
                     node._on_gt_odom(msg)
                     n_gt += 1
-                elif topic == "/Conos_raw":
+                elif topic == cone_topic:
                     node._on_cones(msg)
                     n_cones += 1
                     _record_scan(t_ns * 1e-9)

@@ -195,3 +195,39 @@ def test_final_lap_true_from_the_start_is_unchanged(node):
     _past_start(node)
     node._on_orange(_gate())
     assert node._stop_latched
+
+
+# ------------------------------------------------- ConeArray transport (/cones_orange)
+
+def _gate_array(n_cones: int = 2):
+    """The same gate as `_gate`, as the dv_msgs/ConeArray control now subscribes to."""
+    from dv_msgs.msg import ConeArray
+    ma = _gate(n_cones)
+    a = ConeArray()
+    cones = [m for m in ma.markers if m.action != Marker.DELETEALL]
+    a.x = [float(m.pose.position.x) for m in cones]
+    a.y = [float(m.pose.position.y) for m in cones]
+    return a
+
+
+def test_cone_array_latches_the_same_anchor_as_markers(node):
+    _past_start(node)
+    node._on_orange(_gate_array())
+    assert node._stop_latched
+    from_array = node._stop_anchor_xy
+    other = ControlNode()
+    try:
+        odom = Odometry()
+        odom.pose.pose.orientation.w = 1.0
+        other._latest_pose = odom
+        _past_start(other)
+        other._on_orange(_gate())
+        assert other._stop_anchor_xy == pytest.approx(from_array)
+    finally:
+        other.destroy_node()
+
+
+def test_cone_array_needs_two_cones(node):
+    _past_start(node)
+    node._on_orange(_gate_array(1))
+    assert not node._stop_latched

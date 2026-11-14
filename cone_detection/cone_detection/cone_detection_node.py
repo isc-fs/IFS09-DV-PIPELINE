@@ -51,6 +51,7 @@ import numpy as np
 from typing import TYPE_CHECKING
 
 from builtin_interfaces.msg import Time
+from dv_msgs.msg import ConeArray
 from node_base.base_lifecycle_node import BaseLifecycleNode
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.lifecycle import TransitionCallbackReturn, State
@@ -189,6 +190,8 @@ class ConeDetectionNode(BaseLifecycleNode):
         self._cone_strategy: ConeDetectionStrategy | None = None
         self._pub_markers = None
         self._pub_orange = None
+        self._pub_cones = None
+        self._pub_cones_orange = None
         self._pub_ground = None
         self._pub_above = None
         self._pub_hz = None
@@ -237,6 +240,15 @@ class ConeDetectionNode(BaseLifecycleNode):
                 )
                 return TransitionCallbackReturn.FAILURE
 
+            # Cone transport (dv_msgs/ConeArray): what SLAM and control read.
+            self._pub_cones = self.create_lifecycle_publisher(
+                ConeArray, "cones_raw", 10,
+            )
+            self._pub_cones_orange = self.create_lifecycle_publisher(
+                ConeArray, "cones_orange", 10,
+            )
+            # Same cones as MarkerArrays for viewers and recorders; built only
+            # when something subscribes (MarkerArray is costly in rclpy).
             self._pub_markers = self.create_lifecycle_publisher(
                 MarkerArray, "Conos_raw", 10,
             )
@@ -338,6 +350,8 @@ class ConeDetectionNode(BaseLifecycleNode):
         for attr in (
             "_pub_markers",
             "_pub_orange",
+            "_pub_cones",
+            "_pub_cones_orange",
             "_pub_ground",
             "_pub_above",
             "_pub_hz",
@@ -410,7 +424,7 @@ class ConeDetectionNode(BaseLifecycleNode):
         # mid-callback teardown safety.
         if not self._is_active or self._cone_strategy is None:
             return
-        if self._pub_markers is None or self._pub_orange is None:
+        if self._pub_cones is None or self._pub_cones_orange is None:
             return
 
         point_cloud = self.pointcloud2_to_xyz(msg, getattr(self, "_cpp_decode", None))
@@ -428,17 +442,27 @@ class ConeDetectionNode(BaseLifecycleNode):
         big_orange_threshold = (
             self._cone_strategy.big_orange_height_threshold_m()
         )
-        marker_array, orange_array = self._cones_to_markers(
+        cones_msg, orange_msg = self._cones_to_arrays(
             result.cones,
             stamp=msg.header.stamp,
             big_orange_threshold_m=big_orange_threshold,
         )
-        self._pub_markers.publish(marker_array)
+        self._pub_cones.publish(cones_msg)
         # Publish even when the current scan has no big-orange cones so
         # downstream consumers do not keep a stale cache when the gate exits
         # the LiDAR FoV at close range (sensor is ~1.4 m forward of the car, so
         # start-gate cones leave the ±60° H-FOV before the car passes them).
-        self._pub_orange.publish(orange_array)
+        self._pub_cones_orange.publish(orange_msg)
+        if _has_subs(self._pub_markers) or _has_subs(self._pub_orange):
+            marker_array, orange_array = self._cones_to_markers(
+                result.cones,
+                stamp=msg.header.stamp,
+                big_orange_threshold_m=big_orange_threshold,
+            )
+            if _has_subs(self._pub_markers):
+                self._pub_markers.publish(marker_array)
+            if _has_subs(self._pub_orange):
+                self._pub_orange.publish(orange_array)
 
     def _accumulate_diagnostics(self, result: DetectionResult) -> None:
         """Sum per-scan filter counters and emit one CONE_FILTER line per second."""
@@ -533,6 +557,34 @@ class ConeDetectionNode(BaseLifecycleNode):
         _publish_f32(self._pub_n_far_dropped, float(dc.get("far_dropped", 0)))
         _publish_f32(self._pub_n_left, float(dc.get("accepted_left", 0)))
         _publish_f32(self._pub_n_right, float(dc.get("accepted_right", 0)))
+
+    @staticmethod
+    def _cones_to_arrays(
+        cones: list[ConeObservation],
+        *,
+        stamp: Time,
+        big_orange_threshold_m: float,
+    ) -> tuple[ConeArray, ConeArray]:
+        """Build the /cones_raw and /cones_orange ConeArrays (base_link).
+
+        Same cones and split as ``_cones_to_markers``. ``height`` and ``sigma_xy``
+        are the raw values (the markers clamp height to >= 0.1 m for display and
+        encode an unknown sigma as 0.1; here unknown is < 0).
+        """
+        out = []
+        for keep in (lambda c: True, lambda c: c.height_m > big_orange_threshold_m):
+            sel = [c for c in cones if keep(c)]
+            m = ConeArray()
+            m.header.frame_id = "base_link"
+            m.header.stamp = stamp
+            m.x = [float(c.x) for c in sel]
+            m.y = [float(c.y) for c in sel]
+            m.z = [0.0] * len(sel)
+            m.height = [float(c.height_m) for c in sel]
+            m.sigma_xy = [float(c.sigma_xy) if c.sigma_xy > 0.0 else -1.0 for c in sel]
+            m.id = [-1] * len(sel)
+            out.append(m)
+        return out[0], out[1]
 
     @staticmethod
     def _cones_to_markers(

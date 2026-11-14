@@ -6,7 +6,7 @@ Replaces `slam_node` in the running pipeline:
 
   - Subscribes:
       /testing_only/odom        (sim ground truth, ENU)
-      /Conos_raw                (per-scan cone observations, base_link)
+      /cones_raw                (dv_msgs/ConeArray, per-scan cone observations, base_link)
       /odom                     (odometry_filter_node's EKF dead-reckoning,
                                  odom → base_link — needed to compute the
                                  map → odom correction exactly like slam_node)
@@ -18,9 +18,11 @@ Replaces `slam_node` in the running pipeline:
                                  odom → base_link is owned by
                                  odometry_filter_node and NOT published here —
                                  two writers on one TF edge is last-writer-wins.)
-      /Conos                    (MarkerArray in `map`, /Conos_raw projected
+      /cones                    (dv_msgs/ConeArray in `map`, /cones_raw projected
                                  through the GT pose; no landmark identity,
                                  just current-scan cones at world positions)
+      /Conos                    (the same as MarkerArray, for viewers; built
+                                 only when something subscribes)
 
 Anchor: the first GT message received becomes the calibration-end anchor.
 Subsequent GT poses are expressed in `gt_init.inverse() * gt_now`, which
@@ -60,6 +62,7 @@ from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
+from dv_msgs.msg import ConeArray
 
 # Same SE(2) map→odom math slam_node uses (pure-Python, no rclpy import).
 from cone_slam.tf_math import compute_map_to_odom
@@ -124,7 +127,8 @@ class GTPoseRelay(Node):
         # Publishers (same names + QoS as slam_node).
         self._tf_broadcaster = TransformBroadcaster(self)
         self._state_pub = self.create_publisher(Odometry, "/slam/pose", 10)
-        self._cones_pub = self.create_publisher(MarkerArray, "/Conos", 10)
+        self._cones_array_pub = self.create_publisher(ConeArray, "/cones", 10)
+        self._cones_pub = self.create_publisher(MarkerArray, "/Conos", 10)  # viewers
 
         # GT subscription (BEST_EFFORT, matches slam_node).
         gt_qos = QoSProfile(
@@ -147,7 +151,7 @@ class GTPoseRelay(Node):
 
         # Cone observations — reliable (same QoS as slam_node).
         self.create_subscription(
-            MarkerArray, "/Conos_raw", self._on_cones, 10)
+            ConeArray, "/cones_raw", self._on_cones, 10)
 
         self.get_logger().info(
             "gt_pose_relay started — DIAGNOSTIC MODE, GT pose as SLAM output")
@@ -269,33 +273,42 @@ class GTPoseRelay(Node):
 
     # ------------------------------------------------------------------ Cones
 
-    def _on_cones(self, msg: MarkerArray) -> None:
+    def _on_cones(self, msg: ConeArray) -> None:
+        """Project the scan's body-frame cones into `map` with the GT pose:
+        /cones (ConeArray, what the planner reads) and, when something
+        subscribes, the /Conos MarkerArray for viewers."""
         if self._gt_init_x is None:
             return  # no anchor yet
+        c = math.cos(self._aligned_yaw)
+        s = math.sin(self._aligned_yaw)
+        wx = [float(self._aligned_x + c * bx - s * by) for bx, by in zip(msg.x, msg.y)]
+        wy = [float(self._aligned_y + s * bx + c * by) for bx, by in zip(msg.x, msg.y)]
+        arr = ConeArray()
+        arr.header.stamp = msg.header.stamp
+        arr.header.frame_id = MAP_FRAME
+        arr.x, arr.y = wx, wy
+        arr.z = [0.0] * len(wx)
+        arr.height = list(msg.height)
+        arr.sigma_xy = list(msg.sigma_xy)
+        arr.id = list(range(len(wx)))
+        self._cones_array_pub.publish(arr)
+        if self._cones_pub.get_subscription_count() == 0:
+            return
         out = MarkerArray()
         # Clear previous frame's cones in visualizers.
         clear = Marker()
         clear.header.frame_id = MAP_FRAME
         clear.action = Marker.DELETEALL
         out.markers.append(clear)
-
-        c = math.cos(self._aligned_yaw)
-        s = math.sin(self._aligned_yaw)
-        for i, m in enumerate(msg.markers):
-            if m.action == Marker.DELETEALL:
-                continue
-            bx = m.pose.position.x
-            by = m.pose.position.y
-            wx = self._aligned_x + c * bx - s * by
-            wy = self._aligned_y + s * bx + c * by
+        for i, (x, y) in enumerate(zip(wx, wy)):
             mk = Marker()
-            mk.header.stamp = m.header.stamp
+            mk.header.stamp = msg.header.stamp
             mk.header.frame_id = MAP_FRAME
             mk.id = i
             mk.type = Marker.CYLINDER
             mk.action = Marker.ADD
-            mk.pose.position.x = float(wx)
-            mk.pose.position.y = float(wy)
+            mk.pose.position.x = x
+            mk.pose.position.y = y
             mk.pose.position.z = 0.0
             mk.pose.orientation.w = 1.0
             mk.scale.x = 0.2
@@ -307,7 +320,6 @@ class GTPoseRelay(Node):
             mk.color.a = 1.0
             out.markers.append(mk)
         self._cones_pub.publish(out)
-
 
 def main() -> None:
     rclpy.init()

@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/SetMission.action"
   "action/RuntimeControl.action"
   "msg/LifecycleProgress.msg"
+  "msg/ConeArray.msg"
   "srv/ActivateMode.srv"
   "srv/Setup.srv"
   "srv/StartBag.srv"

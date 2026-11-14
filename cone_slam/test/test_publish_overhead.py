@@ -192,3 +192,63 @@ def test_delta_every_scan_restores_the_old_cadence(slam):
     slam.set_parameters([Parameter("cone_map_full_delta_every_n_scans", value=1)])
     _scans(slam, 6)
     assert len(full.sent) == 6
+
+
+# ------------------------------------------- ConeArray transport (/cones_raw, /cones)
+
+class _ArrPub:
+    def __init__(self):
+        self.sent = []
+
+    def publish(self, msg):
+        self.sent.append(msg)
+
+
+def test_cones_array_every_scan_markers_only_with_subscribers(slam):
+    conos, _ = _map_rig(slam)
+    arr = slam._cones_array_pub = _ArrPub()
+    conos.subs = 0                                     # no viewer on /Conos
+    _scans(slam, 4)
+    assert conos.sent == [], "MarkerArray built with nobody listening"
+    assert len(arr.sent) == 4
+    last = arr.sent[-1]
+    assert list(last.id) == [0, 1, 2, 3, 4]
+    assert list(last.x) == pytest.approx([0.0, 1.0, 2.0, 3.0, 4.0])
+    assert last.header.frame_id == slam.map_frame and last.header.stamp.sec == 4
+    conos.subs = 1                                     # a viewer connects
+    slam._graph.step = 5
+    slam._publish_cone_map(Time(sec=5))
+    assert len(conos.sent) == 1 and len(conos.sent[0]) == 1 + 5
+
+
+def test_cone_array_observations_match_markers():
+    """Same cones as ConeArray and as detection's MarkerArray → identical observations."""
+    from dv_msgs.msg import ConeArray
+    from visualization_msgs.msg import MarkerArray
+    cones = [(3.0, 1.0, 0.33, 0.05), (5.0, -1.5, 0.05, -1.0), (8.0, 2.0, 0.5, 0.12)]
+    a = ConeArray()
+    a.header.stamp = Time(sec=3)
+    a.x, a.y = [c[0] for c in cones], [c[1] for c in cones]
+    a.height, a.sigma_xy = [c[2] for c in cones], [c[3] for c in cones]
+    ma = MarkerArray()
+    lead = Marker(); lead.action = Marker.DELETEALL; lead.header.stamp = Time(sec=3)
+    ma.markers.append(lead)
+    for x, y, h, s in cones:                           # as cone_detection_node encodes them
+        m = Marker(); m.action = Marker.ADD; m.header.stamp = Time(sec=3)
+        m.pose.position.x, m.pose.position.y = x, y
+        m.scale.x = s if s > 0 else 0.1
+        m.scale.z = max(0.1, h)
+        ma.markers.append(m)
+    obs_a = ConeGraphSlamNode._observations_from_markers(a)
+    obs_m = ConeGraphSlamNode._observations_from_markers(ma)
+    key = lambda o: (o.body_x, o.body_y, round(o.height, 6), round(o.sigma_xy, 6))
+    assert [key(o) for o in obs_a] == pytest.approx([key(o) for o in obs_m])
+    assert ConeGraphSlamNode._stamp_msg(a).sec == 3
+
+
+def test_empty_cone_array_still_carries_the_scan_stamp():
+    from dv_msgs.msg import ConeArray
+    a = ConeArray()
+    a.header.stamp = Time(sec=11)
+    assert ConeGraphSlamNode._stamp_msg(a).sec == 11
+    assert ConeGraphSlamNode._observations_from_markers(a) == []
