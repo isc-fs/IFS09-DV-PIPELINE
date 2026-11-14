@@ -1,14 +1,11 @@
-"""Ground-plane viz cloud: same RANSAC rotation as /Conos_raw, floor at z=0."""
+"""Ground-plane viz cloud: same ground-frame rotation as /Conos_raw, floor at z=0."""
 
 import numpy as np
 
-from cone_detection.cone_detection import (
-    ConeDetectionConfig,
-    RealtimeConeDetector,
-    ground_rotation_matrix,
-    rotate_xyz_to_ground,
-)
-from cone_detection.cone_fit import _CONE_SMALL_C, _CONE_SMALL_D
+from cone_detection.config import ConeDetectionConfig
+from cone_detection.detector import RealtimeConeDetector
+from cone_detection.ground.alignment import ground_rotation_matrix, rotate_xyz_to_ground
+from cone_detection.fitting.cone_classes import CONE_SMALL_C, CONE_SMALL_D
 
 
 def test_tilted_plane_lands_at_z0():
@@ -34,7 +31,7 @@ def test_decimate_caps_count():
     assert len(out) >= 1400
 
 
-def test_detect_fills_last_rotated_xyz_aligned_with_cones():
+def test_ground_frame_scan_aligned_with_cones():
     rng = np.random.default_rng(3)
     n = 4000
     gx = rng.uniform(0.5, 12.0, n)
@@ -54,33 +51,38 @@ def test_detect_fills_last_rotated_xyz_aligned_with_cones():
     )
     scan = np.vstack([ground, cone]).astype(np.float32)
     det = RealtimeConeDetector(ConeDetectionConfig(input_range_crop_m=20.0))
-    cones = det.detect(scan, viz_full_cloud=True)
-    assert len(det.last_rotated_xyz) > 100
+    res = det.detect(scan)
+    cones = res.cones
+    full = res.segmentation.ground_frame_scan()
+    above = res.segmentation.above_ground_xyz
+    assert len(full) > 100
     # Ground band should sit near z=0 after the shift.
-    z = det.last_rotated_xyz[:, 2]
+    z = full[:, 2]
     assert float(np.median(z)) < 0.08
     assert cones, "expected at least one cone on the synthetic cluster"
     # Cone XY in the rotated frame should land near the rotated cluster.
     ax, ay = cones[0][0], cones[0][1]
-    d = np.hypot(det.last_rotated_xyz[:, 0] - ax, det.last_rotated_xyz[:, 1] - ay)
+    d = np.hypot(full[:, 0] - ax, full[:, 1] - ay)
     assert float(d.min()) < 0.35
-    # RANSAC outliers are a strict subset and still contain the cone.
-    assert 0 < len(det.last_outlier_xyz) < len(det.last_rotated_xyz)
-    d_out = np.hypot(
-        det.last_outlier_xyz[:, 0] - ax, det.last_outlier_xyz[:, 1] - ay
-    )
+    # Above-ground points are a strict subset and still contain the cone.
+    assert 0 < len(above) < len(full)
+    d_out = np.hypot(above[:, 0] - ax, above[:, 1] - ay)
     assert float(d_out.min()) < 0.35
 
 
-def test_full_ground_cloud_skipped_unless_requested():
+def test_each_scan_result_keeps_its_own_clouds():
+    """Results are per scan: a later detect() does not change an earlier result."""
     det = RealtimeConeDetector(ConeDetectionConfig(input_range_crop_m=20.0))
     rng = np.random.default_rng(1)
     scan = rng.normal(size=(200, 3)).astype(np.float32)
     scan[:, 2] *= 0.01
-    det.detect(scan)
-    assert len(det.last_rotated_xyz) == 0
-    det.detect(scan, viz_full_cloud=True)
-    assert len(det.last_rotated_xyz) > 0
+    first = det.detect(scan)
+    n_first = len(first.segmentation.ground_frame_scan())
+    assert n_first > 0
+    empty = det.detect(np.zeros((0, 3), dtype=np.float32))
+    assert len(empty.segmentation.ground_frame_scan()) == 0
+    assert empty.segmentation.plane is None
+    assert len(first.segmentation.ground_frame_scan()) == n_first
 
 
 def test_ground_rotation_matrix_is_orthonormal():
@@ -104,7 +106,7 @@ def test_elevated_sensor_cone_fit_uses_height_above_ground():
 
     # Near face of a small cone (template shape, z = d - c r above ground), as a
     # LiDAR sees it: an arc of the surface facing the sensor.
-    cx, cy, c_small, d_small = 7.0, 1.5, _CONE_SMALL_C, _CONE_SMALL_D
+    cx, cy, c_small, d_small = 7.0, 1.5, CONE_SMALL_C, CONE_SMALL_D
     m = 60
     h = rng.uniform(0.06, 0.30, m)
     r = (d_small - h) / c_small
@@ -116,10 +118,11 @@ def test_elevated_sensor_cone_fit_uses_height_above_ground():
 
     scan = np.vstack([ground, cone]).astype(np.float32)
     det = RealtimeConeDetector(ConeDetectionConfig())
-    cones = det.detect(scan)
+    res = det.detect(scan)
+    cones = res.cones
 
-    # Outliers handed to clustering are expressed as height above ground.
-    assert float(det.last_outlier_xyz[:, 2].min()) > 0.0
+    # Points handed to clustering are expressed as height above ground.
+    assert float(res.segmentation.above_ground_xyz[:, 2].min()) > 0.0
     assert len(cones) == 1
     ax, ay = cones[0][0], cones[0][1]
     assert np.hypot(ax - cx, ay - cy) < 0.05

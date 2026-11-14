@@ -73,7 +73,7 @@ _FOXGLOVE_TOPIC_WHITELIST = [
     "/imu", "/motor_rpm",
     # Perception / pipeline timings
     "/cone_detection/hz", "/cone_detection/latency_ms",
-    "/cone_detection/ransac_ms", "/cone_detection/dbscan_ms",
+    "/cone_detection/ground_ms", "/cone_detection/dbscan_ms",
     "/cone_detection/fit_ms", "/cone_detection/n_accepted",
     "/cone_detection/n_clusters", "/cone_detection/n_input_points",
     "/cone_detection/n_after_shape", "/cone_detection/n_far_dropped",
