@@ -74,10 +74,10 @@ class ConeDetectionConfig:
 
     # Ground-removal method (see the ground.methods package): ransac | ransac_zones | ransac_rings | gpf | grid_resid |
     # ray_slope | czm | height_jump | linefit | range_image | groundgrid | pmf | gp_insac | mrf | csf |
-    # patchworkpp. ransac is the production default; the others are being benchmarked
+    # patchworkpp. mrf is the default (ransac before it); the others are being benchmarked
     # (csf and patchworkpp need optional packages). ground_threshold_m below is the
     # ground distance for all of them.
-    ground_method: str = "ransac"
+    ground_method: str = "mrf"
 
     # Ground removal: a return within this distance (m) of the ground is ground,
     # for every method. 0 means a MAD-based threshold for ransac only.

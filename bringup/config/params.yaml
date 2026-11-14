@@ -134,7 +134,7 @@ cone_detection_node:
     big_orange_d_threshold_m: 0.45
     floor_margin_m: 0.04
     min_cluster_points: 3
-    ground_method: ransac
+    ground_method: mrf
     ground_threshold_m: 0.05
     ransac_prob: 0.9999
     ransac_iter_subsample_max: 5000

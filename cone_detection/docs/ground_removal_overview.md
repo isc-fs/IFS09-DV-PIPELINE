@@ -11,7 +11,7 @@ Code:
 - `cone_detection/cone_detection/ground/methods/` — the pluggable ground
   methods (`remove_ground` and the `@register(...)` functions in the
   `*_methods.py` modules)
-- `cone_detection/cone_detection/ground/ransac.py` — `ransac2`, the default method
+- `cone_detection/cone_detection/ground/ransac.py` — `ransac2`, the RANSAC method (the default before `mrf`)
 - `cone_detection/cone_detection/ground/alignment.py` — `vectors2matrix`
 
 Deeper dives:
@@ -94,7 +94,7 @@ non_ground_mask, plane = ground.remove(data)  # every scan
   points they labelled ground (`_refit_on_ground`), falling back to their coarse
   plane if fewer than 3.
 
-### 4.1 RANSAC — the production default (`ransac`)
+### 4.1 RANSAC (`ransac`, the default before `mrf`)
 
 `ground/ransac.py:ransac2`, Numba-compiled.
 
@@ -133,7 +133,7 @@ starting from the lowest points puts it in the floor's basin (it can't jump to
 a wall like RANSAC can). Full derivation in
 [`gpf_ground_plane_fitting.md`](gpf_ground_plane_fitting.md).
 
-### 4.3 MRF — Markov random field on a height grid (`mrf`)
+### 4.3 MRF — Markov random field on a height grid (`mrf`, the default)
 
 Not a plane fit: labels **cells** of a grid as ground or object, so it handles
 uneven ground.
@@ -295,7 +295,7 @@ a bag loops.
 |---|---|---|
 | `input_range_crop_m` | 25 m | step 0 |
 | `input_min_range_m` | 0.1 m | step 0 |
-| `ground_method` | `ransac` | step 1 |
+| `ground_method` | `mrf` | step 1 |
 | `ground_threshold_m` | 0.05 m | step 1, every method |
 | `ransac_prob` | 0.9999 | RANSAC |
 | GPF `seed_pct` / `seed_band_m` / `n_iter` | 2% / 0.12 m / 10 | `_gpf_plane` defaults |
